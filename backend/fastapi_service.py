@@ -1,0 +1,528 @@
+from __future__ import annotations
+
+import base64
+import binascii
+import os
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from model_training import FEATURE_COLUMNS, TARGET_LEVEL_COLUMNS, load_model_artifact, normalize_skin_type, train_and_save_models
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data" / "merged"
+MODELS_DIR = BASE_DIR / "models"
+
+
+def _env_path(name: str, fallback: Path) -> Path:
+    value = os.getenv(name, "").strip()
+    return Path(value) if value else fallback
+
+
+API_PORT = int(os.getenv("AI_SERVICE_PORT", "8000"))
+ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("AI_ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
+AUTO_TRAIN_ON_START = os.getenv("AI_AUTO_TRAIN_ON_START", "true").strip().lower() == "true"
+
+MASTER_DATASET_PATH = _env_path(
+    "MASTER_DATASET_PATH",
+    DATA_DIR / "master_questionnaire_prediction_dataset.csv",
+)
+RECOMMENDATIONS_DATASET_PATH = _env_path(
+    "RECOMMENDATIONS_DATASET_PATH",
+    DATA_DIR / "recommendations_dataset.csv",
+)
+PRODUCTS_DATASET_PATH = _env_path(
+    "PRODUCTS_DATASET_PATH",
+    DATA_DIR / "products_dataset.csv",
+)
+ROUTINES_DATASET_PATH = _env_path(
+    "ROUTINES_DATASET_PATH",
+    DATA_DIR / "routines_dataset.csv",
+)
+MODEL_ARTIFACT_PATH = _env_path(
+    "AI_MODEL_ARTIFACT_PATH",
+    MODELS_DIR / "skincare_models.joblib",
+)
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def clamp_level(value: Any, default: int = 2) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    return max(0, min(5, number))
+
+
+def score_to_severity(score: int) -> str:
+    if score >= 4:
+        return "severe"
+    if score >= 2:
+        return "moderate"
+    return "mild"
+
+
+class PredictRequest(BaseModel):
+    imageBase64: str | None = None
+    questionnaireData: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrainRequest(BaseModel):
+    reason: str | None = None
+
+
+class DatasetStore:
+    def __init__(self) -> None:
+        self.master_df = self._load_dataset(MASTER_DATASET_PATH)
+        self.recommendations_df = self._load_dataset(RECOMMENDATIONS_DATASET_PATH)
+        self.products_df = self._load_dataset(PRODUCTS_DATASET_PATH)
+        self.routines_df = self._load_dataset(ROUTINES_DATASET_PATH)
+        self._normalize_datasets()
+
+    @staticmethod
+    def _load_dataset(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            raise FileNotFoundError(f"Dataset was not found: {path}")
+        return pd.read_csv(path)
+
+    def _normalize_datasets(self) -> None:
+        if "skin_type" in self.master_df.columns:
+            self.master_df["skin_type"] = self.master_df["skin_type"].map(normalize_skin_type)
+
+        if "skin_type" in self.recommendations_df.columns:
+            self.recommendations_df["skin_type"] = self.recommendations_df["skin_type"].map(normalize_skin_type)
+        for col in ["acne_level_0_5", "dryness_level_0_5", "oiliness_level_0_5", "sensitivity_level_0_5"]:
+            if col in self.recommendations_df.columns:
+                self.recommendations_df[col] = (
+                    pd.to_numeric(self.recommendations_df[col], errors="coerce").fillna(0).astype(int)
+                )
+
+        if "target_skin_types" in self.products_df.columns:
+            self.products_df["target_skin_types"] = self.products_df["target_skin_types"].fillna("").astype(str).str.lower()
+        if "target_concerns" in self.products_df.columns:
+            self.products_df["target_concerns"] = self.products_df["target_concerns"].fillna("").astype(str).str.lower()
+        if "category" in self.products_df.columns:
+            self.products_df["category"] = self.products_df["category"].fillna("").astype(str).str.lower()
+        if "brand" in self.products_df.columns:
+            self.products_df["brand"] = self.products_df["brand"].fillna("").astype(str)
+        if "product_name" in self.products_df.columns:
+            self.products_df["product_name"] = self.products_df["product_name"].fillna("").astype(str)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "master_questionnaire_prediction": {
+                "path": str(MASTER_DATASET_PATH),
+                "rows": int(len(self.master_df)),
+                "columns": list(self.master_df.columns),
+            },
+            "recommendations": {
+                "path": str(RECOMMENDATIONS_DATASET_PATH),
+                "rows": int(len(self.recommendations_df)),
+                "columns": list(self.recommendations_df.columns),
+            },
+            "products": {
+                "path": str(PRODUCTS_DATASET_PATH),
+                "rows": int(len(self.products_df)),
+                "columns": list(self.products_df.columns),
+            },
+            "routines": {
+                "path": str(ROUTINES_DATASET_PATH),
+                "rows": int(len(self.routines_df)),
+                "columns": list(self.routines_df.columns),
+            },
+        }
+
+
+class ModelService:
+    def __init__(self, master_dataset_path: Path, model_artifact_path: Path, auto_train_on_start: bool = True) -> None:
+        self.master_dataset_path = master_dataset_path
+        self.model_artifact_path = model_artifact_path
+        self.artifact: dict[str, Any] | None = None
+        if self.model_artifact_path.exists():
+            self.reload()
+        elif auto_train_on_start:
+            self.train("auto_train_on_start")
+        else:
+            raise FileNotFoundError(
+                f"Model artifact not found at {self.model_artifact_path}. "
+                "Set AI_AUTO_TRAIN_ON_START=true or call /training/start."
+            )
+
+    def reload(self) -> None:
+        self.artifact = load_model_artifact(self.model_artifact_path)
+
+    def train(self, reason: str | None = None) -> dict[str, Any]:
+        artifact = train_and_save_models(self.master_dataset_path, self.model_artifact_path)
+        self.artifact = artifact
+        return {
+            "status": "trained",
+            "reason": reason or "manual",
+            "model_artifact_path": str(self.model_artifact_path),
+            "trained_at": artifact.get("trained_at"),
+            "metrics": artifact.get("metrics", {}),
+        }
+
+    def _frontend_value_to_feature(self, questionnaire: dict[str, Any]) -> dict[str, Any]:
+        after_cleansing_map = {
+            "tight": "tight",
+            "comfortable": "balanced",
+            "slightly-oily": "slightly oily",
+            "very-oily": "oily",
+            "dry-dull": "dry",
+        }
+        breakout_map = {
+            "rarely": "rare",
+            "sometimes": "sometimes",
+            "often": "frequent",
+            "always": "frequent",
+        }
+        reaction_map = {
+            "none": "low",
+            "redness": "medium",
+            "breakout": "high",
+            "irritation": "high",
+            "dry-tight": "medium",
+        }
+        pores_map = {"low": "small", "medium": "medium", "high": "large", "variable": "medium"}
+        tightness_map = {"comfortable": "no", "dry-tight": "often", "oily-greasy": "no", "irritated-sensitive": "sometimes"}
+        redness_map = {"red-irritated": "high", "flaky": "medium", "balanced": "low", "shiny-tzone": "low", "shiny-all": "low"}
+        sun_map = {"burn easily": "burn easily", "tan easily": "tan easily", "sometimes burn": "sometimes burn"}
+
+        feature_row = {
+            "age_group": questionnaire.get("age_group") or questionnaire.get("ageRange") or "unknown",
+            "fitzpatrick_type": questionnaire.get("fitzpatrick_type") or questionnaire.get("fitzpatrickType") or "unknown",
+            "q1_skin_feel": questionnaire.get("q1_skin_feel")
+            or after_cleansing_map.get(_clean_text(questionnaire.get("afterCleansing")), "unknown"),
+            "q2_breakouts": questionnaire.get("q2_breakouts")
+            or breakout_map.get(_clean_text(questionnaire.get("breakoutFrequency")), "unknown"),
+            "q3_sensitivity": questionnaire.get("q3_sensitivity")
+            or reaction_map.get(_clean_text(questionnaire.get("productReaction")), "unknown"),
+            "q4_pores": questionnaire.get("q4_pores")
+            or pores_map.get(_clean_text(questionnaire.get("shineLevel")), "unknown"),
+            "q5_tightness": questionnaire.get("q5_tightness")
+            or tightness_map.get(_clean_text(questionnaire.get("endOfDay")), "unknown"),
+            "q6_redness": questionnaire.get("q6_redness")
+            or redness_map.get(_clean_text(questionnaire.get("middayFeeling")), "unknown"),
+            "q7_sun_reaction": questionnaire.get("q7_sun_reaction")
+            or sun_map.get(_clean_text(questionnaire.get("sunReaction")), "unknown"),
+            "q8_hydration_status": questionnaire.get("q8_hydration_status")
+            or ("often dehydrated" if _clean_text(questionnaire.get("afterCleansing")) in {"tight", "dry-dull"} else "well hydrated"),
+            "q9_sleep_quality": questionnaire.get("q9_sleep_quality") or questionnaire.get("sleepQuality") or "unknown",
+            "q10_stress_level": questionnaire.get("q10_stress_level") or questionnaire.get("stressLevel") or "unknown",
+        }
+
+        for key in FEATURE_COLUMNS:
+            feature_row[key] = str(feature_row.get(key, "unknown") or "unknown").strip()
+        return feature_row
+
+    def predict(self, questionnaire: dict[str, Any]) -> dict[str, Any]:
+        if not self.artifact:
+            raise RuntimeError("Model artifact is not loaded.")
+
+        skin_model = self.artifact["skin_model"]
+        level_model = self.artifact["level_model"]
+        level_columns = self.artifact["target_level_columns"]
+
+        feature_row = self._frontend_value_to_feature(questionnaire)
+        X = pd.DataFrame([feature_row], columns=FEATURE_COLUMNS)
+
+        predicted_skin_type = normalize_skin_type(skin_model.predict(X)[0])
+        predicted_levels_raw = level_model.predict(X)[0]
+
+        scores: dict[str, int] = {}
+        for idx, level_column in enumerate(level_columns):
+            predicted_value = clamp_level(round(float(predicted_levels_raw[idx])), default=0)
+            direct_value = questionnaire.get(level_column)
+            if direct_value is not None and str(direct_value).strip() != "":
+                predicted_value = clamp_level(direct_value, default=predicted_value)
+            scores[level_column.replace("_level_0_5", "").replace("_skin", "")] = predicted_value
+
+        confidence = 0.7
+        try:
+            classifier = skin_model.named_steps.get("classifier")
+            encoded = skin_model.named_steps["encoder"].transform(X)
+            if classifier is not None and hasattr(classifier, "predict_proba"):
+                confidence = float(classifier.predict_proba(encoded).max())
+        except Exception:
+            confidence = 0.7
+
+        return {
+            "skin_type": predicted_skin_type,
+            "scores": scores,
+            "confidence": round(max(0.5, min(0.98, confidence)), 2),
+        }
+
+    def status(self) -> dict[str, Any]:
+        if not self.artifact:
+            return {"loaded": False, "model_artifact_path": str(self.model_artifact_path)}
+        return {
+            "loaded": True,
+            "model_artifact_path": str(self.model_artifact_path),
+            "trained_at": self.artifact.get("trained_at"),
+            "metrics": self.artifact.get("metrics", {}),
+        }
+
+
+STORE = DatasetStore()
+MODEL_SERVICE = ModelService(MASTER_DATASET_PATH, MODEL_ARTIFACT_PATH, auto_train_on_start=AUTO_TRAIN_ON_START)
+
+
+def extract_image_bytes(raw_image: str | None) -> bytes | None:
+    if not raw_image:
+        return None
+    text = raw_image.strip()
+    if not text:
+        return None
+
+    payload = text
+    if text.startswith("data:") and "," in text:
+        payload = text.split(",", 1)[1]
+
+    try:
+        return base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def build_conditions(scores: dict[str, int], image_bytes: bytes | None) -> list[dict[str, Any]]:
+    image_bonus = 0.04 if image_bytes else 0.0
+    templates = {
+        "acne": ("Breakout probability detected by trained model.", "T-zone"),
+        "dryness": ("Dryness tendency inferred from the learned questionnaire patterns.", "Cheeks"),
+        "oiliness": ("Oiliness pattern inferred from the learned questionnaire patterns.", "T-zone"),
+        "redness": ("Redness risk detected from trained model outputs.", "Cheeks"),
+        "sensitivity": ("Sensitivity profile inferred by the model.", "General"),
+        "dehydration": ("Hydration barrier support may be needed.", "General"),
+        "mature": ("Mature-skin support may be beneficial.", "Eyes/Forehead"),
+    }
+
+    conditions: list[dict[str, Any]] = []
+    for key, score in scores.items():
+        if score < 2:
+            continue
+        description, area = templates.get(key, ("Concern inferred by model.", "General"))
+        confidence = min(0.95, round(0.54 + (score * 0.07) + image_bonus, 2))
+        conditions.append(
+            {
+                "name": key,
+                "severity": score_to_severity(score),
+                "description": description,
+                "confidence": confidence,
+                "area": area,
+            }
+        )
+
+    if not conditions:
+        conditions.append(
+            {
+                "name": "balanced_skin",
+                "severity": "mild",
+                "description": "Model found no high-severity concern for the provided input.",
+                "confidence": 0.6,
+                "area": "General",
+            }
+        )
+    return conditions
+
+
+def match_recommendation(skin_type: str, scores: dict[str, int]) -> dict[str, Any] | None:
+    df = STORE.recommendations_df
+    subset = df[df["skin_type"] == skin_type].copy()
+    if subset.empty:
+        subset = df.copy()
+    if subset.empty:
+        return None
+
+    target = [
+        scores.get("acne", 0),
+        scores.get("dryness", 0),
+        scores.get("oiliness", 0),
+        scores.get("sensitivity", 0),
+    ]
+    features = ["acne_level_0_5", "dryness_level_0_5", "oiliness_level_0_5", "sensitivity_level_0_5"]
+
+    for feature in features:
+        if feature not in subset.columns:
+            subset[feature] = 0
+    subset["distance"] = (
+        (subset[features[0]] - target[0]).abs()
+        + (subset[features[1]] - target[1]).abs()
+        + (subset[features[2]] - target[2]).abs()
+        + (subset[features[3]] - target[3]).abs()
+    )
+    best = subset.sort_values(["distance"]).iloc[0].to_dict()
+    return {
+        "recommended_cleanser": best.get("recommended_cleanser"),
+        "recommended_moisturizer": best.get("recommended_moisturizer"),
+        "recommended_serum": best.get("recommended_serum"),
+        "recommended_spf": best.get("recommended_spf"),
+        "recommended_treatment": best.get("recommended_treatment"),
+    }
+
+
+app = FastAPI(
+    title="Skincare AI FastAPI Service",
+    description="Model-driven skincare microservice trained on your merged datasets.",
+    version="2.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "skincare-fastapi",
+        "port": API_PORT,
+        "model": MODEL_SERVICE.status(),
+    }
+
+
+@app.get("/datasets/summary")
+def datasets_summary() -> dict[str, Any]:
+    return STORE.summary()
+
+
+@app.get("/recommendations/match")
+def recommendations_match(
+    skin_type: str = Query("normal"),
+    acne_level_0_5: int = Query(0, ge=0, le=5),
+    dryness_level_0_5: int = Query(0, ge=0, le=5),
+    oiliness_level_0_5: int = Query(0, ge=0, le=5),
+    sensitivity_level_0_5: int = Query(0, ge=0, le=5),
+) -> dict[str, Any]:
+    scores = {
+        "acne": acne_level_0_5,
+        "dryness": dryness_level_0_5,
+        "oiliness": oiliness_level_0_5,
+        "sensitivity": sensitivity_level_0_5,
+        "redness": 0,
+        "dehydration": 0,
+        "mature": 0,
+    }
+    normalized_skin_type = normalize_skin_type(skin_type)
+    match = match_recommendation(normalized_skin_type, scores)
+    if not match:
+        raise HTTPException(status_code=404, detail="No recommendation match found.")
+    return {"skin_type": normalized_skin_type, "scores": scores, "match": match}
+
+
+@app.get("/products/search")
+def products_search(
+    q: str | None = Query(default=None),
+    skin_type: str | None = Query(default=None),
+    concern: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    df = STORE.products_df.copy()
+    if skin_type:
+        token = normalize_skin_type(skin_type)
+        df = df[df["target_skin_types"].str.contains(token, na=False)]
+    if concern:
+        df = df[df["target_concerns"].str.contains(_clean_text(concern), na=False)]
+    if category:
+        df = df[df["category"].str.contains(_clean_text(category), na=False)]
+    if q:
+        needle = _clean_text(q)
+        df = df[
+            df["product_name"].str.lower().str.contains(needle, na=False)
+            | df["brand"].str.lower().str.contains(needle, na=False)
+        ]
+    records = df.head(limit).to_dict(orient="records")
+    return {"count": len(records), "items": records}
+
+
+@app.get("/routines/match")
+def routines_match(
+    skin_type: str = Query("normal"),
+    acne_level_0_5: int = Query(0, ge=0, le=5),
+    dryness_level_0_5: int = Query(0, ge=0, le=5),
+    oiliness_level_0_5: int = Query(0, ge=0, le=5),
+    sensitivity_level_0_5: int = Query(0, ge=0, le=5),
+) -> dict[str, Any]:
+    normalized_skin_type = normalize_skin_type(skin_type)
+    df = STORE.routines_df.copy()
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No routines dataset available.")
+
+    for feature in ["acne_level_0_5", "dryness_level_0_5", "oiliness_level_0_5", "sensitivity_level_0_5"]:
+        if feature in df.columns:
+            df[feature] = pd.to_numeric(df[feature], errors="coerce").fillna(0).astype(int)
+
+    subset = df[df["skin_type"].map(normalize_skin_type) == normalized_skin_type]
+    if subset.empty:
+        subset = df
+
+    subset = subset.copy()
+    subset["distance"] = (
+        (subset["acne_level_0_5"] - acne_level_0_5).abs()
+        + (subset["dryness_level_0_5"] - dryness_level_0_5).abs()
+        + (subset["oiliness_level_0_5"] - oiliness_level_0_5).abs()
+        + (subset["sensitivity_level_0_5"] - sensitivity_level_0_5).abs()
+    )
+    best = subset.sort_values("distance").head(1).to_dict(orient="records")
+    return {"count": len(best), "items": best}
+
+
+@app.post("/predict")
+def predict(payload: PredictRequest) -> dict[str, Any]:
+    questionnaire = payload.questionnaireData or {}
+    image_bytes = extract_image_bytes(payload.imageBase64)
+
+    model_prediction = MODEL_SERVICE.predict(questionnaire)
+    skin_type = model_prediction["skin_type"]
+    scores = model_prediction["scores"]
+    confidence = model_prediction["confidence"]
+    conditions = build_conditions(scores, image_bytes)
+    recommendation_match = match_recommendation(skin_type, scores)
+
+    summary = (
+        f"Model inference completed. Estimated skin type: {skin_type}. "
+        "Concern levels were produced by trained classifiers/regressors."
+    )
+
+    return {
+        "skinType": skin_type,
+        "confidence": confidence,
+        "summary": summary,
+        "conditions": conditions,
+        "recommendationMatch": recommendation_match,
+        "meta": {
+            "model_artifact_path": str(MODEL_ARTIFACT_PATH),
+            "trained_at": MODEL_SERVICE.status().get("trained_at"),
+            "service_mode": "trained_model",
+            "used_image_signal": bool(image_bytes),
+        },
+    }
+
+
+@app.get("/training/status")
+def training_status() -> dict[str, Any]:
+    return MODEL_SERVICE.status()
+
+
+@app.post("/training/start")
+def training_start(payload: TrainRequest) -> dict[str, Any]:
+    return MODEL_SERVICE.train(payload.reason)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("fastapi_service:app", host="0.0.0.0", port=API_PORT, reload=False)
