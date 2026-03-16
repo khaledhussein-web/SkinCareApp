@@ -1,4 +1,3 @@
-
 # Personalized Skincare Web App
 
 This project now has:
@@ -86,4 +85,3 @@ Main endpoints:
 - `POST /api/auth/reset-password`
 
 The frontend auth context now calls these backend endpoints instead of mock local-only auth.
-  
