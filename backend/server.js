@@ -304,6 +304,19 @@ async function tableExistsInClient(client, tableName) {
   return result.rowCount > 0;
 }
 
+async function columnExists(tableName, columnName, client = null) {
+  const runQuery = client ? client.query.bind(client) : query;
+  const result = await runQuery(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = $1
+       AND column_name = $2`,
+    [tableName, columnName],
+  );
+  return result.rowCount > 0;
+}
+
 let authSessionsTableReady = false;
 
 async function ensureAuthSessionsTable() {
@@ -2438,55 +2451,106 @@ app.put("/api/admin/support-messages/:id", async (req, res) => {
 
 app.get("/api/admin/analytics", async (_req, res) => {
   try {
-    const userGrowth = await query(
-      `SELECT to_char(month_start, 'Mon') AS month,
-              COALESCE(data.users, 0)::int AS users
-       FROM generate_series(
-         date_trunc('month', NOW()) - INTERVAL '5 months',
-         date_trunc('month', NOW()),
-         INTERVAL '1 month'
-       ) AS month_start
-       LEFT JOIN (
-         SELECT date_trunc('month', created_at) AS month_start, COUNT(*) AS users
+    const [hasUsersTable, hasAssessmentsTable, hasDetectedConditionsTable, hasSkinConditionsTable] = await Promise.all([
+      tableExists("users"),
+      tableExists("skin_assessments"),
+      tableExists("ai_detected_conditions"),
+      tableExists("skin_conditions"),
+    ]);
+
+    const monthFormatter = new Intl.DateTimeFormat("en-US", { month: "short" });
+    const monthStarts = [];
+    const currentMonthStart = new Date();
+    currentMonthStart.setDate(1);
+    currentMonthStart.setHours(0, 0, 0, 0);
+    currentMonthStart.setMonth(currentMonthStart.getMonth() - 5);
+    for (let i = 0; i < 6; i += 1) {
+      const monthStart = new Date(currentMonthStart);
+      monthStart.setMonth(currentMonthStart.getMonth() + i);
+      monthStarts.push(monthStart);
+    }
+
+    let userGrowthData = monthStarts.map((monthStart) => ({
+      month: monthFormatter.format(monthStart),
+      users: 0,
+    }));
+    if (hasUsersTable) {
+      const userGrowth = await query(
+        `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month_key,
+                COUNT(*)::int AS users
          FROM users
-         GROUP BY 1
-       ) AS data
-       ON data.month_start = month_start
-       ORDER BY month_start`,
-    );
+         WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '5 months'
+         GROUP BY 1`,
+      );
+      const growthMap = new Map(userGrowth.rows.map((row) => [row.month_key, Number(row.users || 0)]));
+      userGrowthData = monthStarts.map((monthStart) => {
+        const monthKey = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, "0")}`;
+        return {
+          month: monthFormatter.format(monthStart),
+          users: growthMap.get(monthKey) || 0,
+        };
+      });
+    }
 
-    const dailyAssessments = await query(
-      `SELECT to_char(day_date, 'Dy') AS day,
-              COALESCE(data.assessments, 0)::int AS assessments
-       FROM generate_series(
-         CURRENT_DATE - INTERVAL '6 days',
-         CURRENT_DATE,
-         INTERVAL '1 day'
-       ) AS day_date
-       LEFT JOIN (
-         SELECT assessment_date::date AS day_date, COUNT(*) AS assessments
+    const weekdayFormatter = new Intl.DateTimeFormat("en-US", { weekday: "short" });
+    const days = [];
+    const startDay = new Date();
+    startDay.setHours(0, 0, 0, 0);
+    startDay.setDate(startDay.getDate() - 6);
+    for (let i = 0; i < 7; i += 1) {
+      const nextDay = new Date(startDay);
+      nextDay.setDate(startDay.getDate() + i);
+      days.push(nextDay);
+    }
+
+    let assessmentData = days.map((dayDate) => ({
+      day: weekdayFormatter.format(dayDate),
+      assessments: 0,
+    }));
+    if (hasAssessmentsTable) {
+      const dailyAssessments = await query(
+        `SELECT to_char(assessment_date::date, 'YYYY-MM-DD') AS day_key,
+                COUNT(*)::int AS assessments
          FROM skin_assessments
-         GROUP BY 1
-       ) AS data
-       ON data.day_date = day_date::date
-       ORDER BY day_date`,
-    );
+         WHERE assessment_date::date >= CURRENT_DATE - INTERVAL '6 days'
+         GROUP BY 1`,
+      );
+      const assessmentMap = new Map(dailyAssessments.rows.map((row) => [row.day_key, Number(row.assessments || 0)]));
+      assessmentData = days.map((dayDate) => {
+        const dayKey = [
+          dayDate.getFullYear(),
+          String(dayDate.getMonth() + 1).padStart(2, "0"),
+          String(dayDate.getDate()).padStart(2, "0"),
+        ].join("-");
+        return {
+          day: weekdayFormatter.format(dayDate),
+          assessments: assessmentMap.get(dayKey) || 0,
+        };
+      });
+    }
 
-    const conditionDistribution = await query(
-      `SELECT sc.condition_name AS name, COUNT(*)::int AS value
-       FROM ai_detected_conditions dc
-       JOIN skin_conditions sc ON sc.condition_id = dc.condition_id
-       GROUP BY sc.condition_name
-       ORDER BY COUNT(*) DESC
-       LIMIT 6`,
-    );
+    let conditionData = [];
+    if (hasDetectedConditionsTable && hasSkinConditionsTable) {
+      const conditionDistribution = await query(
+        `SELECT sc.condition_name AS name, COUNT(*)::int AS value
+         FROM ai_detected_conditions dc
+         JOIN skin_conditions sc ON sc.condition_id = dc.condition_id
+         GROUP BY sc.condition_name
+         ORDER BY COUNT(*) DESC
+         LIMIT 6`,
+      );
+      conditionData = conditionDistribution.rows;
+    }
 
-    const skinTypeRows = await query(`SELECT notes FROM skin_assessments WHERE notes IS NOT NULL`);
+    const skinTypeRows =
+      hasAssessmentsTable && (await columnExists("skin_assessments", "notes"))
+        ? await query(`SELECT notes FROM skin_assessments WHERE notes IS NOT NULL`)
+        : { rows: [] };
     const skinTypeMap = new Map();
     for (const row of skinTypeRows.rows) {
       try {
-        const parsed = JSON.parse(row.notes);
-        const skinType = parsed?.skinType || "Unknown";
+        const parsed = typeof row.notes === "string" ? JSON.parse(row.notes) : row.notes;
+        const skinType = parsed?.skinType || parsed?.skin_type || "Unknown";
         skinTypeMap.set(skinType, (skinTypeMap.get(skinType) || 0) + 1);
       } catch (_error) {
         // ignore malformed notes
@@ -2495,13 +2559,15 @@ app.get("/api/admin/analytics", async (_req, res) => {
     const skinTypeData = [...skinTypeMap.entries()].map(([name, value]) => ({ name, value }));
 
     const [totalAssessments, activeUsers7d, totalUsers] = await Promise.all([
-      query(`SELECT COUNT(*)::int AS count FROM skin_assessments`),
-      query(
-        `SELECT COUNT(*)::int AS count
-         FROM users
-         WHERE updated_at >= NOW() - INTERVAL '7 days'`,
-      ),
-      query(`SELECT COUNT(*)::int AS count FROM users`),
+      hasAssessmentsTable ? query(`SELECT COUNT(*)::int AS count FROM skin_assessments`) : Promise.resolve({ rows: [{ count: 0 }] }),
+      hasUsersTable
+        ? query(
+            `SELECT COUNT(*)::int AS count
+             FROM users
+             WHERE updated_at >= NOW() - INTERVAL '7 days'`,
+          )
+        : Promise.resolve({ rows: [{ count: 0 }] }),
+      hasUsersTable ? query(`SELECT COUNT(*)::int AS count FROM users`) : Promise.resolve({ rows: [{ count: 0 }] }),
     ]);
 
     return res.json({
@@ -2510,10 +2576,10 @@ app.get("/api/admin/analytics", async (_req, res) => {
         activeUsers7d: activeUsers7d.rows[0].count,
         totalUsers: totalUsers.rows[0].count,
       },
-      userGrowthData: userGrowth.rows,
-      assessmentData: dailyAssessments.rows,
+      userGrowthData,
+      assessmentData,
       skinTypeData,
-      conditionData: conditionDistribution.rows,
+      conditionData,
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch analytics", details: error.message });
