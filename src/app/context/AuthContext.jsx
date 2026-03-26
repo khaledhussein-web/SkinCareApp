@@ -57,9 +57,15 @@ export const AuthProvider = ({ children }) => {
       body: { name, email, password, gender, dateOfBirth, phoneNumber },
     });
 
-    setUser(data.user);
-    localStorage.setItem("user", JSON.stringify(data.user));
-    localStorage.setItem("auth_token", data.token);
+    // Registration should not auto-sign-in; require explicit login afterward.
+    setUser(null);
+    localStorage.removeItem("user");
+    localStorage.removeItem("auth_token");
+    fetch(`${API_BASE_URL}/api/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => {});
+
     return data.user;
   };
 

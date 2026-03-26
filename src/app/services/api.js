@@ -156,7 +156,6 @@ export async function apiFetch(path, options = {}) {
 
   if (
     path.startsWith("/api/auth/login") ||
-    path.startsWith("/api/auth/register") ||
     path.startsWith("/api/auth/refresh")
   ) {
     persistAuthPayload(payload);

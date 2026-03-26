@@ -6,10 +6,10 @@ import { Input } from '@/app/components/ui/input';
 import { Label } from '@/app/components/ui/label';
 import { Card, CardContent } from '@/app/components/ui/card';
 import { useAuth } from '@/app/context/AuthContext';
-import { Sparkles, Mail, Lock, User, Loader2, Eye, EyeOff, CheckCircle2, Phone } from 'lucide-react';
+import { Sparkles, Mail, Lock, User, Loader2, Eye, EyeOff, CheckCircle2, Phone, CalendarDays } from 'lucide-react';
 import { toast } from 'sonner';
 
-export const RegisterScreen: React.FC = () => {
+export const RegisterScreen = () => {
   const navigate = useNavigate();
   const { register } = useAuth();
   const [formData, setFormData] = useState({
@@ -24,24 +24,25 @@ export const RegisterScreen: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const todayIso = new Date().toISOString().split('T')[0];
 
   const passwordRequirements = [
     { label: 'At least 6 characters', met: formData.password.length >= 6 },
     { label: 'Passwords match', met: formData.password === formData.confirmPassword && formData.password.length > 0 },
   ];
 
-  const normalizePhoneNumber = (value: string) => value.replace(/[\s()-]/g, '');
+  const normalizePhoneNumber = (value) => value.replace(/[\s()-]/g, '');
 
-  const isValidPhoneNumber = (value: string) => /^\+?\d{7,15}$/.test(normalizePhoneNumber(value));
+  const isValidPhoneNumber = (value) => /^\+?\d{7,15}$/.test(normalizePhoneNumber(value));
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+  const handleChange = (e) => {
     setFormData({
       ...formData,
       [e.target.name]: e.target.value,
     });
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
     if (formData.password !== formData.confirmPassword) {
@@ -71,7 +72,7 @@ export const RegisterScreen: React.FC = () => {
         normalizePhoneNumber(formData.phoneNumber),
       );
       toast.success('Account created successfully!');
-      navigate('/dashboard');
+      navigate('/login');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Registration failed');
     } finally {
@@ -164,15 +165,20 @@ export const RegisterScreen: React.FC = () => {
                   Date of Birth
                 </Label>
                 <div className="relative mt-2">
+                  <CalendarDays className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 pointer-events-none" />
                   <Input
                     id="dateOfBirth"
                     name="dateOfBirth"
                     type="date"
                     value={formData.dateOfBirth}
                     onChange={handleChange}
+                    min="1900-01-01"
+                    max={todayIso}
                     required
+                    className="pl-10 pr-10 text-slate-700 [color-scheme:light]"
                   />
                 </div>
+                <p className="mt-1 text-xs text-slate-500">Use your real birth date (YYYY-MM-DD).</p>
               </div>
 
               <div>

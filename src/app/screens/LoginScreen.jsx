@@ -24,7 +24,8 @@ export const LoginScreen: React.FC = () => {
 
     try {
       const loggedInUser = await login(email, password);
-      toast.success('Welcome back!');
+      const displayName = String(loggedInUser?.name || 'User').trim();
+      toast.success(`Welcome "${displayName}"`);
       navigate(loggedInUser?.role === 'admin' ? '/admin' : '/dashboard');
     } catch (error) {
       toast.error('Invalid email or password');
