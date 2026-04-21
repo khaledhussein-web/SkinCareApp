@@ -9,6 +9,7 @@ import { Navbar } from '@/app/components/Navbar';
 import { HomeScreen } from '@/app/screens/HomeScreen';
 import { DashboardScreen } from '@/app/screens/DashboardScreen';
 import { ContactScreen } from '@/app/screens/ContactScreen';
+import { FeedbackScreen } from '@/app/screens/FeedbackScreen';
 import { LoginScreen } from '@/app/screens/LoginScreen';
 import { RegisterScreen } from '@/app/screens/RegisterScreen';
 import { ForgotPasswordScreen } from '@/app/screens/ForgotPasswordScreen';
@@ -33,6 +34,7 @@ export default function App() {
               {/* Public Routes */}
               <Route path="/" element={<HomeScreen />} />
               <Route path="/contact" element={<ContactScreen />} />
+              <Route path="/feedback" element={<FeedbackScreen />} />
               <Route path="/login" element={<LoginScreen />} />
               <Route path="/register" element={<RegisterScreen />} />
               <Route path="/forgot-password" element={<ForgotPasswordScreen />} />

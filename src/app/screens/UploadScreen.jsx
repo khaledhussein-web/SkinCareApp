@@ -14,15 +14,10 @@ export const UploadScreen: React.FC = () => {
   const [uploadError, setUploadError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hasQuestionnaireAnswers = Boolean(questionnaireData && Object.keys(questionnaireData).length > 0);
 
   const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
   const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-
-  useEffect(() => {
-    if (!questionnaireData) {
-      navigate('/questionnaire');
-    }
-  }, [navigate, questionnaireData]);
 
   useEffect(() => {
     if (uploadedImage) {
@@ -95,6 +90,11 @@ export const UploadScreen: React.FC = () => {
         <div className="text-center mb-6 sm:mb-8">
           <h1 className="text-3xl sm:text-4xl mb-2 sm:mb-3 text-slate-800">Upload Your Photo</h1>
           <p className="text-sm sm:text-base text-slate-600">Let's analyze your skin condition</p>
+          {!hasQuestionnaireAnswers ? (
+            <p className="mt-2 text-xs sm:text-sm text-blue-700">
+              Weekly check-in mode: we will reuse your latest saved questionnaire when available.
+            </p>
+          ) : null}
         </div>
 
         <ProgressBar currentStep={2} totalSteps={4} />

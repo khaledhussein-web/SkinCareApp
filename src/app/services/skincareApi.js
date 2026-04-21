@@ -8,6 +8,39 @@ export async function submitContactMessage(payload) {
   });
 }
 
+export async function submitFeedback(payload) {
+  const safeRating = Number(payload?.rating);
+  const ratingLabel = Number.isFinite(safeRating) && safeRating > 0 ? `${safeRating}/5` : "No rating";
+  const categoryLabel = String(payload?.category || "General").trim();
+  const subject = `Client Feedback (${ratingLabel}) - ${categoryLabel}`;
+
+  const details = [
+    `What worked well:\n${String(payload?.highlights || "Not provided").trim() || "Not provided"}`,
+    `Feedback and notes:\n${String(payload?.notes || "Not provided").trim() || "Not provided"}`,
+    `Suggested improvements:\n${String(payload?.suggestions || "Not provided").trim() || "Not provided"}`,
+  ];
+
+  return submitContactMessage({
+    name: payload?.name,
+    email: payload?.email,
+    subject,
+    message: details.join("\n\n"),
+  });
+}
+
+export async function fetchUserProfilePhoto() {
+  // Load authenticated user's profile photo if one exists.
+  return apiFetch("/api/users/me/profile-photo");
+}
+
+export async function uploadUserProfilePhoto(imageDataUrl) {
+  // Save authenticated user's profile photo.
+  return apiFetch("/api/users/me/profile-photo", {
+    method: "POST",
+    body: { imageDataUrl },
+  });
+}
+
 export async function runSkinAnalysis(payload) {
   // Run questionnaire + image analysis for the authenticated user.
   return apiFetch("/api/assessments/analyze", {
@@ -19,6 +52,11 @@ export async function runSkinAnalysis(payload) {
 export async function fetchAssessmentHistory() {
   // Get assessment history for the authenticated user.
   return apiFetch("/api/assessments/history");
+}
+
+export async function fetchWeeklyProgress() {
+  // Get weekly progress rollups (improved / no change / worse) for the authenticated user.
+  return apiFetch("/api/assessments/weekly-progress");
 }
 
 export async function sendChatMessage(payload) {
@@ -86,6 +124,9 @@ export async function fetchAdminSupportMessages(params = {}) {
   const query = new URLSearchParams();
   if (params.status && params.status !== "all") {
     query.set("status", params.status);
+  }
+  if (params.type && params.type !== "all") {
+    query.set("type", params.type);
   }
   if (params.limit) {
     query.set("limit", String(params.limit));

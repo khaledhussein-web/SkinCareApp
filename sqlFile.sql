@@ -1,264 +1,315 @@
--- =========================
--- 0) Extensions
--- =========================
-CREATE EXTENSION IF NOT EXISTS "pgcrypto"; -- gen_random_uuid()
+-- ============================================================
+-- Personalized Skincare Web App - Current Backend Schema
+-- Source of truth for `npm run db:init`
+-- ============================================================
 
--- =========================
--- 1) Enums
--- =========================
-DO $$ BEGIN
-  CREATE TYPE user_role AS ENUM ('user','admin');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-DO $$ BEGIN
-  CREATE TYPE user_status AS ENUM ('active','inactive','banned');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- ============================================================
+-- 1) Roles + Users
+-- ============================================================
 
-DO $$ BEGIN
-  CREATE TYPE assessment_status AS ENUM ('pending','completed','failed');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE TABLE IF NOT EXISTS roles (
+  role_id      SERIAL PRIMARY KEY,
+  role_name    VARCHAR(50) NOT NULL UNIQUE,
+  description  TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-DO $$ BEGIN
-  CREATE TYPE skin_type_enum AS ENUM ('oily','dry','combination','normal','sensitive');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE INDEX IF NOT EXISTS idx_roles_role_name ON roles (role_name);
 
-DO $$ BEGIN
-  CREATE TYPE sun_exposure_enum AS ENUM ('low','medium','high');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE severity_enum AS ENUM ('mild','moderate','severe');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE recommendation_type_enum AS ENUM ('product','routine','lifestyle');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE priority_enum AS ENUM ('high','medium','low');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE chat_sender_enum AS ENUM ('user','ai');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE chat_session_status AS ENUM ('active','closed');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE contact_category_enum AS ENUM ('general','technical','billing');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE TYPE contact_status_enum AS ENUM ('new','in_progress','resolved');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
--- =========================
--- 2) USERS
--- =========================
 CREATE TABLE IF NOT EXISTS users (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name          VARCHAR(120) NOT NULL,
-  email         VARCHAR(255) NOT NULL UNIQUE,
-  password      TEXT NOT NULL,                 -- bcrypt hash
-  role          user_role NOT NULL DEFAULT 'user',
-  status        user_status NOT NULL DEFAULT 'active',
-  profile_photo TEXT,
-  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_login    TIMESTAMPTZ
+  user_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  role_id        INTEGER NOT NULL REFERENCES roles(role_id),
+  full_name      VARCHAR(120) NOT NULL,
+  email          VARCHAR(255) NOT NULL UNIQUE,
+  password_hash  TEXT NOT NULL,
+  gender         VARCHAR(32),
+  date_of_birth  DATE,
+  phone          VARCHAR(32),
+  is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+  is_banned      BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
-CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
-CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+CREATE INDEX IF NOT EXISTS idx_users_role_id ON users (role_id);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (created_at);
+CREATE INDEX IF NOT EXISTS idx_users_updated_at ON users (updated_at);
+CREATE INDEX IF NOT EXISTS idx_users_lower_email ON users (LOWER(email));
 
--- =========================
--- 3) ASSESSMENTS
--- =========================
-CREATE TABLE IF NOT EXISTS assessments (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  assessment_date  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  skin_health_score INT CHECK (skin_health_score BETWEEN 0 AND 100),
-  photo_url        TEXT,
-  status           assessment_status NOT NULL DEFAULT 'pending',
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+-- ============================================================
+-- 2) Auth session + password reset + profile photo
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS user_session (
+  session_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id              UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  refresh_token_hash   TEXT NOT NULL UNIQUE,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_used_at         TIMESTAMPTZ,
+  expires_at           TIMESTAMPTZ NOT NULL,
+  revoked_at           TIMESTAMPTZ,
+  created_ip           VARCHAR(64),
+  user_agent           TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_assessments_user_id ON assessments(user_id);
-CREATE INDEX IF NOT EXISTS idx_assessments_date ON assessments(assessment_date);
-CREATE INDEX IF NOT EXISTS idx_assessments_score ON assessments(skin_health_score);
+CREATE INDEX IF NOT EXISTS idx_user_session_user_active
+  ON user_session (user_id, expires_at)
+  WHERE revoked_at IS NULL;
 
--- =========================
--- 4) QUESTIONNAIRE_RESPONSES (1-1 with assessment)
--- =========================
-CREATE TABLE IF NOT EXISTS questionnaire_responses (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  assessment_id  UUID NOT NULL UNIQUE REFERENCES assessments(id) ON DELETE CASCADE,
-  skin_type      skin_type_enum NOT NULL,
-  concerns       JSONB NOT NULL DEFAULT '[]'::jsonb, -- array of strings
-  age_range      VARCHAR(20) NOT NULL,
-  current_routine TEXT NOT NULL,
-  allergies      TEXT,
-  sun_exposure   sun_exposure_enum NOT NULL,
-  location       VARCHAR(255) NOT NULL,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+CREATE INDEX IF NOT EXISTS idx_user_session_expires_at
+  ON user_session (expires_at);
 
-CREATE INDEX IF NOT EXISTS idx_questionnaire_skin_type ON questionnaire_responses(skin_type);
-CREATE INDEX IF NOT EXISTS idx_questionnaire_concerns_gin ON questionnaire_responses USING GIN (concerns);
-
--- =========================
--- 5) DETECTED_CONDITIONS (N per assessment)
--- =========================
-CREATE TABLE IF NOT EXISTS detected_conditions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  assessment_id   UUID NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
-  condition_type  VARCHAR(80) NOT NULL,          -- e.g. acne, hyperpigmentation
-  severity        severity_enum NOT NULL,
-  confidence_score REAL NOT NULL CHECK (confidence_score BETWEEN 0 AND 1),
-  location_on_face VARCHAR(80),
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_conditions_assessment_id ON detected_conditions(assessment_id);
-CREATE INDEX IF NOT EXISTS idx_conditions_type ON detected_conditions(condition_type);
-CREATE INDEX IF NOT EXISTS idx_conditions_severity ON detected_conditions(severity);
-
--- =========================
--- 6) RECOMMENDATIONS (N per assessment)
--- =========================
-CREATE TABLE IF NOT EXISTS recommendations (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  assessment_id       UUID NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
-  recommendation_type recommendation_type_enum NOT NULL,
-  title               VARCHAR(200) NOT NULL,
-  description         TEXT NOT NULL,
-  priority            priority_enum NOT NULL DEFAULT 'medium',
-  category            VARCHAR(80),                -- moisturizer/cleanser/etc.
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_reco_assessment_id ON recommendations(assessment_id);
-CREATE INDEX IF NOT EXISTS idx_reco_type ON recommendations(recommendation_type);
-CREATE INDEX IF NOT EXISTS idx_reco_priority ON recommendations(priority);
-
--- =========================
--- 7) WEATHER_DATA (1-1 with assessment)
--- =========================
-CREATE TABLE IF NOT EXISTS weather_data (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  assessment_id    UUID NOT NULL UNIQUE REFERENCES assessments(id) ON DELETE CASCADE,
-  location         VARCHAR(255) NOT NULL,
-  temperature      REAL NOT NULL,
-  humidity         REAL NOT NULL,
-  uv_index         INT NOT NULL,
-  condition        VARCHAR(80) NOT NULL,
-  air_quality_index INT,
-  fetched_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_weather_location ON weather_data(location);
-CREATE INDEX IF NOT EXISTS idx_weather_fetched_at ON weather_data(fetched_at);
-
--- =========================
--- 8) CHAT_SESSIONS
--- =========================
-CREATE TABLE IF NOT EXISTS chat_sessions (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  assessment_id  UUID REFERENCES assessments(id) ON DELETE SET NULL,
-  started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  ended_at       TIMESTAMPTZ,
-  total_messages INT NOT NULL DEFAULT 0,
-  status         chat_session_status NOT NULL DEFAULT 'active'
-);
-
-CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_chat_sessions_assessment_id ON chat_sessions(assessment_id);
-CREATE INDEX IF NOT EXISTS idx_chat_sessions_started_at ON chat_sessions(started_at);
-
--- =========================
--- 9) CHAT_MESSAGES
--- =========================
-CREATE TABLE IF NOT EXISTS chat_messages (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id   UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
-  sender       chat_sender_enum NOT NULL,
-  message      TEXT NOT NULL,
-  "timestamp"  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  context_data JSONB
-);
-
-CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages("timestamp");
-
--- =========================
--- 10) PASSWORD_RESET_TOKENS
--- =========================
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
-  token_id   SERIAL PRIMARY KEY,
-  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  token      TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMPTZ NOT NULL,
-  used       BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  token_id     SERIAL PRIMARY KEY,
+  user_id      UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  token        TEXT NOT NULL UNIQUE,
+  expires_at   TIMESTAMP NOT NULL,
+  used         BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_reset_user_id ON password_reset_tokens(user_id);
-CREATE INDEX IF NOT EXISTS idx_reset_expires_at ON password_reset_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+  ON password_reset_tokens (user_id);
 
--- =========================
--- 11) CONTACT_SUBMISSIONS
--- =========================
-CREATE TABLE IF NOT EXISTS contact_submissions (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id        UUID REFERENCES users(id) ON DELETE SET NULL,
-  name          VARCHAR(120) NOT NULL,
-  email         VARCHAR(255) NOT NULL,
-  subject       VARCHAR(200) NOT NULL,
-  category      contact_category_enum NOT NULL,
-  message       TEXT NOT NULL,
-  status        contact_status_enum NOT NULL DEFAULT 'new',
-  admin_response TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  resolved_at   TIMESTAMPTZ
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at
+  ON password_reset_tokens (expires_at);
+
+CREATE TABLE IF NOT EXISTS user_profile_photos (
+  user_id      UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+  image_data   TEXT NOT NULL,
+  mime_type    VARCHAR(64),
+  file_size    INTEGER NOT NULL DEFAULT 0,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_contact_user_id ON contact_submissions(user_id);
-CREATE INDEX IF NOT EXISTS idx_contact_status ON contact_submissions(status);
-CREATE INDEX IF NOT EXISTS idx_contact_created_at ON contact_submissions(created_at);
+-- ============================================================
+-- 3) Questionnaire + assessments + images
+-- ============================================================
 
--- =========================
--- 12) ADMIN_ACTIVITY_LOGS
--- =========================
-CREATE TABLE IF NOT EXISTS admin_activity_logs (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  admin_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  action_type    VARCHAR(60) NOT NULL, -- e.g. user_edit, user_ban, report_export
-  target_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-  description    TEXT,
-  metadata       JSONB,
-  ip_address     VARCHAR(64),
-  "timestamp"    TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS skin_questions (
+  question_id     SERIAL PRIMARY KEY,
+  question_text   TEXT NOT NULL UNIQUE,
+  question_type   VARCHAR(50) NOT NULL,
+  is_required     BOOLEAN NOT NULL DEFAULT TRUE,
+  display_order   INTEGER NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_admin_logs_admin_id ON admin_activity_logs(admin_id);
-CREATE INDEX IF NOT EXISTS idx_admin_logs_action_type ON admin_activity_logs(action_type);
-CREATE INDEX IF NOT EXISTS idx_admin_logs_timestamp ON admin_activity_logs("timestamp");
+CREATE INDEX IF NOT EXISTS idx_skin_questions_display_order
+  ON skin_questions (display_order);
 
--- =========================
--- 13) SYSTEM_SETTINGS
--- =========================
-CREATE TABLE IF NOT EXISTS system_settings (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  key         VARCHAR(120) NOT NULL UNIQUE,
-  value       JSONB NOT NULL,
-  description TEXT,
-  updated_by  UUID REFERENCES users(id) ON DELETE SET NULL,
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS question_options (
+  option_id       SERIAL PRIMARY KEY,
+  question_id     INTEGER NOT NULL REFERENCES skin_questions(question_id) ON DELETE CASCADE,
+  option_text     TEXT NOT NULL,
+  option_value    TEXT NOT NULL,
+  display_order   INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_question_options_question_id
+  ON question_options (question_id);
+
+CREATE INDEX IF NOT EXISTS idx_question_options_question_value
+  ON question_options (question_id, option_value);
+
+CREATE TABLE IF NOT EXISTS skin_assessments (
+  assessment_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  assessment_date  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status           VARCHAR(30) NOT NULL DEFAULT 'PENDING'
+                    CHECK (status IN ('PENDING', 'COMPLETED', 'FAILED')),
+  notes            TEXT,
+  overall_score    INTEGER CHECK (overall_score BETWEEN 0 AND 100)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skin_assessments_user_date
+  ON skin_assessments (user_id, assessment_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_skin_assessments_status
+  ON skin_assessments (status);
+
+CREATE TABLE IF NOT EXISTS assessment_answers (
+  answer_id            BIGSERIAL PRIMARY KEY,
+  assessment_id        UUID NOT NULL REFERENCES skin_assessments(assessment_id) ON DELETE CASCADE,
+  question_id          INTEGER NOT NULL REFERENCES skin_questions(question_id) ON DELETE CASCADE,
+  answer_text          TEXT NOT NULL,
+  selected_option_id   INTEGER REFERENCES question_options(option_id) ON DELETE SET NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_answers_assessment_id
+  ON assessment_answers (assessment_id);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_answers_question_id
+  ON assessment_answers (question_id);
+
+CREATE TABLE IF NOT EXISTS skin_images (
+  image_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  assessment_id   UUID NOT NULL REFERENCES skin_assessments(assessment_id) ON DELETE CASCADE,
+  user_id         UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  image_url       TEXT NOT NULL,
+  image_type      VARCHAR(20) NOT NULL DEFAULT 'FACE',
+  file_name       TEXT,
+  mime_type       VARCHAR(100),
+  file_size       INTEGER,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_skin_images_assessment_id
+  ON skin_images (assessment_id);
+
+CREATE INDEX IF NOT EXISTS idx_skin_images_user_id
+  ON skin_images (user_id);
+
+-- ============================================================
+-- 4) AI analysis + recommendations + weather
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS skin_conditions (
+  condition_id      SERIAL PRIMARY KEY,
+  condition_name    VARCHAR(120) NOT NULL UNIQUE,
+  description       TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS ai_analyses (
+  analysis_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  assessment_id       UUID NOT NULL REFERENCES skin_assessments(assessment_id) ON DELETE CASCADE,
+  model_name          VARCHAR(120) NOT NULL,
+  model_version       VARCHAR(120),
+  summary             TEXT,
+  confidence_score    NUMERIC(5,4) CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  analysis_status     VARCHAR(30) NOT NULL DEFAULT 'SUCCESS'
+                      CHECK (analysis_status IN ('PENDING', 'SUCCESS', 'FAILED')),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_analyses_assessment_id
+  ON ai_analyses (assessment_id);
+
+CREATE INDEX IF NOT EXISTS idx_ai_analyses_created_at
+  ON ai_analyses (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_detected_conditions (
+  detected_condition_id  BIGSERIAL PRIMARY KEY,
+  analysis_id            UUID NOT NULL REFERENCES ai_analyses(analysis_id) ON DELETE CASCADE,
+  condition_id           INTEGER NOT NULL REFERENCES skin_conditions(condition_id) ON DELETE RESTRICT,
+  severity_level         VARCHAR(20) NOT NULL
+                         CHECK (severity_level IN ('mild', 'moderate', 'severe')),
+  confidence_score       NUMERIC(5,4) CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  detected_area          VARCHAR(120),
+  notes                  TEXT,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_detected_conditions_analysis_id
+  ON ai_detected_conditions (analysis_id);
+
+CREATE INDEX IF NOT EXISTS idx_ai_detected_conditions_condition_id
+  ON ai_detected_conditions (condition_id);
+
+CREATE TABLE IF NOT EXISTS recommendations (
+  recommendation_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  assessment_id        UUID NOT NULL REFERENCES skin_assessments(assessment_id) ON DELETE CASCADE,
+  analysis_id          UUID REFERENCES ai_analyses(analysis_id) ON DELETE SET NULL,
+  recommendation_type  VARCHAR(30) NOT NULL
+                       CHECK (recommendation_type IN ('product', 'routine', 'lifestyle')),
+  title                VARCHAR(200) NOT NULL,
+  details              TEXT NOT NULL,
+  priority_level       VARCHAR(20)
+                       CHECK (priority_level IS NULL OR priority_level IN ('high', 'medium', 'low')),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_recommendations_assessment_id_created_at
+  ON recommendations (assessment_id, created_at);
+
+CREATE TABLE IF NOT EXISTS weather_logs (
+  weather_log_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  assessment_id       UUID NOT NULL REFERENCES skin_assessments(assessment_id) ON DELETE CASCADE,
+  city                VARCHAR(120),
+  country             VARCHAR(120),
+  temperature         NUMERIC(6,2),
+  humidity            NUMERIC(6,2),
+  uv_index            NUMERIC(6,2),
+  weather_condition   VARCHAR(120),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_weather_logs_assessment_id
+  ON weather_logs (assessment_id);
+
+-- ============================================================
+-- 5) AI chat
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS ai_chat_conversations (
+  conversation_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  title             VARCHAR(255),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_chat_conversations_user_updated
+  ON ai_chat_conversations (user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_chat_messages (
+  message_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id   UUID NOT NULL REFERENCES ai_chat_conversations(conversation_id) ON DELETE CASCADE,
+  sender_type       VARCHAR(10) NOT NULL CHECK (sender_type IN ('USER', 'AI')),
+  message_text      TEXT NOT NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_conversation_created
+  ON ai_chat_messages (conversation_id, created_at);
+
+-- ============================================================
+-- 6) Support + admin reports
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS support_messages (
+  support_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID REFERENCES users(user_id) ON DELETE SET NULL,
+  name            VARCHAR(120) NOT NULL,
+  email           VARCHAR(255) NOT NULL,
+  subject         VARCHAR(255) NOT NULL,
+  message         TEXT NOT NULL,
+  status          VARCHAR(20) NOT NULL DEFAULT 'OPEN'
+                  CHECK (status IN ('OPEN', 'IN_PROGRESS', 'RESOLVED')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_messages_status
+  ON support_messages (status);
+
+CREATE INDEX IF NOT EXISTS idx_support_messages_created_at
+  ON support_messages (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS admin_reports (
+  report_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  generated_by    UUID REFERENCES users(user_id) ON DELETE SET NULL,
+  report_type     VARCHAR(60) NOT NULL,
+  notes           TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_reports_generated_by
+  ON admin_reports (generated_by);
+
+CREATE INDEX IF NOT EXISTS idx_admin_reports_created_at
+  ON admin_reports (created_at DESC);
+
+-- ============================================================
+-- 7) Baseline seed data
+-- ============================================================
+
+INSERT INTO roles (role_name, description)
+VALUES
+  ('user', 'Default user role'),
+  ('admin', 'Administrator role')
+ON CONFLICT (role_name) DO NOTHING;

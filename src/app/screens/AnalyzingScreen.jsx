@@ -21,8 +21,8 @@ export const AnalyzingScreen = () => {
   useEffect(() => {
     // Kick off analysis when this screen mounts, then route to results.
     const analyze = async () => {
-      if (!user?.id || !questionnaireData) {
-        navigate("/questionnaire");
+      if (!user?.id) {
+        navigate("/login");
         return;
       }
       if (!uploadedImage) {
@@ -32,7 +32,7 @@ export const AnalyzingScreen = () => {
 
       try {
         const response = await runSkinAnalysis({
-          questionnaireData,
+          questionnaireData: questionnaireData || {},
           imageBase64: uploadedImage,
         });
 

@@ -14,6 +14,7 @@ export const Navbar: React.FC = () => {
   const navItems = [
     { path: '/', label: 'Home' },
     { path: isAdmin ? '/admin' : '/dashboard', label: isAdmin ? 'Admin' : 'Dashboard' },
+    { path: '/feedback', label: 'Feedback' },
     { path: '/contact', label: 'Contact' },
   ];
 

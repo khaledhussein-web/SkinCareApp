@@ -1,27 +1,93 @@
 ﻿
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Card, CardContent } from '@/app/components/ui/card';
 import { Button } from '@/app/components/ui/button';
 import { Input } from '@/app/components/ui/input';
 import { Label } from '@/app/components/ui/label';
-import { Avatar, AvatarFallback } from '@/app/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/app/components/ui/avatar';
 import { Separator } from '@/app/components/ui/separator';
 import { useAuth } from '@/app/context/AuthContext';
 import { User, Mail, Calendar, Shield, Camera, Save } from 'lucide-react';
 import { toast } from 'sonner';
+import { fetchUserProfilePhoto, uploadUserProfilePhoto } from '@/app/services/skincareApi';
 
 export const ProfileScreen: React.FC = () => {
   const { user } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
+  const [profilePhotoUrl, setProfilePhotoUrl] = useState(null);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const fileInputRef = useRef(null);
   const [formData, setFormData] = useState({
     name: user?.name || '',
     email: user?.email || '',
   });
 
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadProfilePhoto = async () => {
+      try {
+        const response = await fetchUserProfilePhoto();
+        if (isMounted) {
+          setProfilePhotoUrl(response?.photoUrl || null);
+        }
+      } catch (_error) {
+        // Keep UI functional even if photo fetch fails.
+      }
+    };
+
+    loadProfilePhoto();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const handleSave = () => {
     toast.success('Profile updated successfully');
     setIsEditing(false);
+  };
+
+  const fileToDataUrl = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read image file'));
+      reader.readAsDataURL(file);
+    });
+
+  const handleCameraClick = () => {
+    if (isUploadingPhoto) return;
+    fileInputRef.current?.click();
+  };
+
+  const handlePhotoSelection = async (event) => {
+    const file = event.target?.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!String(file.type || '').startsWith('image/')) {
+      toast.error('Please select an image file.');
+      return;
+    }
+
+    const maxSizeBytes = 5 * 1024 * 1024;
+    if (Number(file.size || 0) > maxSizeBytes) {
+      toast.error('Image is too large. Maximum size is 5MB.');
+      return;
+    }
+
+    setIsUploadingPhoto(true);
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      const response = await uploadUserProfilePhoto(dataUrl);
+      setProfilePhotoUrl(response?.photoUrl || dataUrl);
+      toast.success('Profile photo updated.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to upload profile photo');
+    } finally {
+      setIsUploadingPhoto(false);
+    }
   };
 
   return (
@@ -48,13 +114,28 @@ export const ProfileScreen: React.FC = () => {
                 <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6 mb-6">
                   <div className="relative">
                     <Avatar className="w-24 h-24 bg-gradient-to-br from-pink-400 to-purple-500">
+                      {profilePhotoUrl ? (
+                        <AvatarImage src={profilePhotoUrl} alt={`${user?.name || 'User'} profile photo`} />
+                      ) : null}
                       <AvatarFallback className="text-3xl text-white">
-                        {user?.name?.charAt(0)}
+                        {user?.name?.charAt(0) || 'U'}
                       </AvatarFallback>
                     </Avatar>
-                    <button className="absolute bottom-0 right-0 p-2 bg-white rounded-full shadow-lg hover:shadow-xl transition-shadow">
+                    <button
+                      type="button"
+                      onClick={handleCameraClick}
+                      disabled={isUploadingPhoto}
+                      className="absolute bottom-0 right-0 p-2 bg-white rounded-full shadow-lg hover:shadow-xl transition-shadow disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
                       <Camera className="w-4 h-4 text-purple-600" />
                     </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handlePhotoSelection}
+                    />
                   </div>
                   <div className="flex-1">
                     <h2 className="text-2xl mb-1 text-slate-800">{user?.name}</h2>

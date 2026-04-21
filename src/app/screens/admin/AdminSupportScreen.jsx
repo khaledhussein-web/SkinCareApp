@@ -10,13 +10,14 @@ import { fetchAdminSupportMessages, updateAdminSupportMessage } from "@/app/serv
 
 export const AdminSupportScreen = () => {
   const [filterStatus, setFilterStatus] = useState("all");
+  const [filterType, setFilterType] = useState("feedback");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const loadMessages = async (status = filterStatus) => {
+  const loadMessages = async (status = filterStatus, type = filterType) => {
     setLoading(true);
     try {
-      const data = await fetchAdminSupportMessages({ status, limit: 150 });
+      const data = await fetchAdminSupportMessages({ status, type, limit: 150 });
       setMessages(data.messages || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to load support messages");
@@ -26,9 +27,9 @@ export const AdminSupportScreen = () => {
   };
 
   useEffect(() => {
-    loadMessages(filterStatus);
+    loadMessages(filterStatus, filterType);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterStatus]);
+  }, [filterStatus, filterType]);
 
   const totals = useMemo(() => {
     return messages.reduce(
@@ -51,6 +52,25 @@ export const AdminSupportScreen = () => {
     return "bg-blue-100 text-blue-700 border-blue-200";
   };
 
+  const getTypeBadgeClasses = (type) => {
+    const normalized = String(type || "").toLowerCase();
+    if (normalized === "feedback") return "bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200";
+    return "bg-slate-100 text-slate-700 border-slate-200";
+  };
+
+  const parseFeedbackSections = (message) => {
+    const text = String(message || "").trim();
+    const matched = text.match(
+      /What worked well:\s*([\s\S]*?)\s*Feedback and notes:\s*([\s\S]*?)\s*Suggested improvements:\s*([\s\S]*)/i,
+    );
+    if (!matched) return null;
+    return [
+      { label: "What worked well", value: matched[1].trim() || "-" },
+      { label: "Feedback and notes", value: matched[2].trim() || "-" },
+      { label: "Suggested improvements", value: matched[3].trim() || "-" },
+    ];
+  };
+
   const handleStatusUpdate = async (messageId, status) => {
     try {
       await updateAdminSupportMessage(messageId, { status });
@@ -66,9 +86,19 @@ export const AdminSupportScreen = () => {
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
         <div>
           <h2 className="text-2xl text-slate-800">Support Messages</h2>
-          <p className="text-sm text-slate-600">Review and resolve incoming contact requests</p>
+          <p className="text-sm text-slate-600">Review and resolve incoming contact requests and feedback</p>
         </div>
         <div className="flex items-center gap-2">
+          <Select value={filterType} onValueChange={setFilterType}>
+            <SelectTrigger className="w-[160px]">
+              <SelectValue placeholder="Message type" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Types</SelectItem>
+              <SelectItem value="feedback">Feedback</SelectItem>
+              <SelectItem value="contact">Contact</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={filterStatus} onValueChange={setFilterStatus}>
             <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Filter by status" />
@@ -80,7 +110,7 @@ export const AdminSupportScreen = () => {
               <SelectItem value="resolved">Resolved</SelectItem>
             </SelectContent>
           </Select>
-          <Button variant="outline" onClick={() => loadMessages(filterStatus)}>
+          <Button variant="outline" onClick={() => loadMessages(filterStatus, filterType)}>
             <RefreshCw className="w-4 h-4 mr-2" />
             Refresh
           </Button>
@@ -111,7 +141,9 @@ export const AdminSupportScreen = () => {
             <p className="p-6 text-sm text-slate-600">No support messages for this filter.</p>
           ) : (
             <div className="divide-y">
-              {messages.map((item, index) => (
+              {messages.map((item, index) => {
+                const feedbackSections = item.type === "feedback" ? parseFeedbackSections(item.message) : null;
+                return (
                 <motion.div
                   key={item.id}
                   initial={{ opacity: 0, y: 8 }}
@@ -124,11 +156,25 @@ export const AdminSupportScreen = () => {
                       <div className="flex items-center gap-2 mb-2">
                         <Mail className="w-4 h-4 text-slate-500" />
                         <p className="text-sm text-slate-800">{item.subject}</p>
+                        <Badge variant="outline" className={getTypeBadgeClasses(item.type)}>
+                          {item.type === "feedback" ? "feedback" : "contact"}
+                        </Badge>
                         <Badge variant="outline" className={getStatusBadgeClasses(item.status)}>
                           {String(item.status || "open").replace("_", " ")}
                         </Badge>
                       </div>
-                      <p className="text-sm text-slate-600 mb-2">{item.message}</p>
+                      {feedbackSections ? (
+                        <div className="mb-2 space-y-2">
+                          {feedbackSections.map((section) => (
+                            <div key={section.label} className="text-sm text-slate-600">
+                              <p className="text-xs uppercase tracking-wide text-slate-500">{section.label}</p>
+                              <p className="whitespace-pre-line">{section.value}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-600 mb-2 whitespace-pre-line">{item.message}</p>
+                      )}
                       <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
                         <span>{item.name}</span>
                         <span>{item.email}</span>
@@ -158,7 +204,8 @@ export const AdminSupportScreen = () => {
                     </div>
                   </div>
                 </motion.div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>

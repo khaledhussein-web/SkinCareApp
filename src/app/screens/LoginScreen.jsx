@@ -143,15 +143,6 @@ export const LoginScreen: React.FC = () => {
               </p>
             </div>
 
-            <div className="mt-6 pt-6 border-t">
-              <p className="text-xs text-slate-500 text-center">
-                <strong>Demo Credentials:</strong>
-                <br />
-                Admin: admin@skincare.com / admin123
-                <br />
-                User: any@email.com / password123
-              </p>
-            </div>
           </CardContent>
         </Card>
       </motion.div>

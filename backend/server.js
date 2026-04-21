@@ -35,6 +35,7 @@ const WEB3FORMS_FROM_NAME = String(process.env.WEB3FORMS_FROM_NAME || "SkinCare 
   .trim();
 const WEB3FORMS_TIMEOUT_MS = Number(process.env.WEB3FORMS_TIMEOUT_MS) || 10_000;
 const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || "20mb";
+const PROFILE_PHOTO_MAX_BYTES = Math.max(100_000, Number(process.env.PROFILE_PHOTO_MAX_BYTES) || 5 * 1024 * 1024);
 
 app.use(
   cors({
@@ -430,6 +431,234 @@ async function getPasswordResetPrimaryKeyColumn(client = null) {
      LIMIT 1`,
   );
   return result.rowCount > 0 ? result.rows[0].column_name : null;
+}
+
+let userProfilePhotosTableReady = false;
+
+async function ensureUserProfilePhotosTable() {
+  if (userProfilePhotosTableReady) {
+    return true;
+  }
+
+  await query(
+    `CREATE TABLE IF NOT EXISTS user_profile_photos (
+      user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+      image_data TEXT NOT NULL,
+      mime_type VARCHAR(64),
+      file_size INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+  );
+
+  userProfilePhotosTableReady = true;
+  return true;
+}
+
+function parseProfilePhotoDataUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return { error: "imageDataUrl is required" };
+  }
+
+  const matched = raw.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/);
+  if (!matched) {
+    return { error: "imageDataUrl must be a valid base64 data URL" };
+  }
+
+  const mimeType = String(matched[1] || "").toLowerCase();
+  const allowedMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"]);
+  if (!allowedMimeTypes.has(mimeType)) {
+    return { error: "Only JPG, PNG, WEBP, or GIF images are allowed" };
+  }
+
+  const normalizedBase64 = String(matched[2] || "").replace(/\s+/g, "");
+  const padding = normalizedBase64.endsWith("==") ? 2 : normalizedBase64.endsWith("=") ? 1 : 0;
+  const bytes = Math.max(0, Math.floor((normalizedBase64.length * 3) / 4) - padding);
+  if (bytes <= 0) {
+    return { error: "Invalid image payload" };
+  }
+  if (bytes > PROFILE_PHOTO_MAX_BYTES) {
+    return {
+      error: `Profile photo exceeds limit (${Math.ceil(PROFILE_PHOTO_MAX_BYTES / (1024 * 1024))}MB)`,
+    };
+  }
+
+  return {
+    error: null,
+    dataUrl: `data:${mimeType};base64,${normalizedBase64}`,
+    mimeType,
+    bytes,
+  };
+}
+
+function isNonEmptyPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0);
+}
+
+async function getLatestQuestionnaireDataForUser(userId, client = null) {
+  const runQuery = client ? client.query.bind(client) : query;
+  const result = await runQuery(
+    `SELECT notes
+     FROM skin_assessments
+     WHERE user_id = $1
+       AND notes IS NOT NULL
+     ORDER BY assessment_date DESC
+     LIMIT 20`,
+    [userId],
+  );
+
+  for (const row of result.rows) {
+    if (!row?.notes) continue;
+    try {
+      const parsed = JSON.parse(row.notes);
+      if (isNonEmptyPlainObject(parsed?.questionnaireData)) {
+        return parsed.questionnaireData;
+      }
+    } catch (_error) {
+      // Skip malformed notes from older assessments.
+    }
+  }
+
+  return {};
+}
+
+function parseSkinTypeFromAssessmentNotes(notes) {
+  if (!notes) return "Unknown";
+  try {
+    const parsed = JSON.parse(notes);
+    return normalizeSkinTypeCandidate(parsed?.skinType) || "Unknown";
+  } catch (_error) {
+    return "Unknown";
+  }
+}
+
+function toWeekStartUtcDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const normalized = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const mondayOffset = (normalized.getUTCDay() + 6) % 7;
+  normalized.setUTCDate(normalized.getUTCDate() - mondayOffset);
+  return normalized;
+}
+
+function toDateOnlyString(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+function toProgressStatus(currentWeek, previousWeek) {
+  if (!previousWeek) {
+    return {
+      status: "baseline",
+      label: "Baseline week",
+      scoreChange: null,
+      conditionBurdenChange: null,
+    };
+  }
+
+  const currentScore = Number(currentWeek?.score || 0);
+  const previousScore = Number(previousWeek?.score || 0);
+  const currentBurden = Number(currentWeek?.conditionBurden || 0);
+  const previousBurden = Number(previousWeek?.conditionBurden || 0);
+
+  const scoreChange = currentScore - previousScore;
+  const conditionBurdenChange = currentBurden - previousBurden;
+
+  if (scoreChange >= 3 || (scoreChange >= 1 && conditionBurdenChange <= -1) || conditionBurdenChange <= -2) {
+    return {
+      status: "improved",
+      label: "Improved",
+      scoreChange,
+      conditionBurdenChange,
+    };
+  }
+
+  if (scoreChange <= -3 || (scoreChange <= -1 && conditionBurdenChange >= 1) || conditionBurdenChange >= 2) {
+    return {
+      status: "worse",
+      label: "Worse",
+      scoreChange,
+      conditionBurdenChange,
+    };
+  }
+
+  return {
+    status: "no_change",
+    label: "No significant change",
+    scoreChange,
+    conditionBurdenChange,
+  };
+}
+
+function buildWeeklyProgressPayload(assessments = []) {
+  const weekMap = new Map();
+
+  for (const assessment of assessments) {
+    const weekStartDate = toWeekStartUtcDate(assessment?.date);
+    if (!weekStartDate) continue;
+    const weekKey = toDateOnlyString(weekStartDate);
+    if (!weekKey) continue;
+
+    if (!weekMap.has(weekKey)) {
+      const weekEndDate = new Date(weekStartDate);
+      weekEndDate.setUTCDate(weekEndDate.getUTCDate() + 6);
+
+      weekMap.set(weekKey, {
+        weekStart: weekKey,
+        weekEnd: toDateOnlyString(weekEndDate),
+        assessmentCount: 1,
+        assessmentId: assessment.id,
+        assessmentDate: assessment.date,
+        score: Number(assessment.score || 0),
+        skinType: assessment.skinType || "Unknown",
+        conditionCount: Number(assessment.conditionCount || 0),
+        conditionBurden: Number(assessment.conditionBurden || 0),
+      });
+    } else {
+      weekMap.get(weekKey).assessmentCount += 1;
+    }
+  }
+
+  const weeks = Array.from(weekMap.values()).sort(
+    (a, b) => new Date(b.weekStart).getTime() - new Date(a.weekStart).getTime(),
+  );
+
+  for (let index = 0; index < weeks.length; index += 1) {
+    const previousWeek = weeks[index + 1] || null;
+    weeks[index].progress = toProgressStatus(weeks[index], previousWeek);
+  }
+
+  const streakDayGap = 7 * 24 * 60 * 60 * 1000;
+  let currentStreakWeeks = 0;
+  for (let index = 0; index < weeks.length; index += 1) {
+    if (index === 0) {
+      currentStreakWeeks = 1;
+      continue;
+    }
+    const newer = new Date(weeks[index - 1].weekStart).getTime();
+    const older = new Date(weeks[index].weekStart).getTime();
+    if (newer - older === streakDayGap) {
+      currentStreakWeeks += 1;
+    } else {
+      break;
+    }
+  }
+
+  const summary = {
+    totalAssessments: assessments.length,
+    totalWeeksTracked: weeks.length,
+    latestScore: weeks[0]?.score ?? null,
+    previousScore: weeks[1]?.score ?? null,
+    scoreChangeFromLastWeek: weeks[0]?.progress?.scoreChange ?? null,
+    latestStatus: weeks[0]?.progress?.status ?? null,
+    currentStreakWeeks,
+    improvedWeeks: weeks.filter((week) => week.progress?.status === "improved").length,
+    noChangeWeeks: weeks.filter((week) => week.progress?.status === "no_change").length,
+    worseWeeks: weeks.filter((week) => week.progress?.status === "worse").length,
+  };
+
+  return { summary, weeks };
 }
 
 const QUESTIONNAIRE_QUESTION_DEFINITIONS = [
@@ -1272,6 +1501,13 @@ function normalizeSupportStatus(status) {
   return "OPEN";
 }
 
+function normalizeSupportMessageType(type) {
+  const lowered = String(type || "").trim().toLowerCase();
+  if (lowered === "feedback") return "feedback";
+  if (lowered === "contact") return "contact";
+  return "all";
+}
+
 function safeParseJson(value, fallback = null) {
   if (!value) return fallback;
   try {
@@ -1861,6 +2097,61 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 });
 
+app.get("/api/users/me/profile-photo", authenticateToken, async (req, res) => {
+  try {
+    await ensureUserProfilePhotosTable();
+    const result = await query(
+      `SELECT image_data, updated_at
+       FROM user_profile_photos
+       WHERE user_id = $1`,
+      [req.authUser.id],
+    );
+
+    if (result.rowCount === 0) {
+      return res.json({ photoUrl: null, updatedAt: null });
+    }
+
+    return res.json({
+      photoUrl: result.rows[0].image_data,
+      updatedAt: result.rows[0].updated_at,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch profile photo", details: error.message });
+  }
+});
+
+app.post("/api/users/me/profile-photo", authenticateToken, async (req, res) => {
+  try {
+    const { imageDataUrl } = req.body || {};
+    const parsed = parseProfilePhotoDataUrl(imageDataUrl);
+    if (parsed.error) {
+      return res.status(400).json({ error: parsed.error });
+    }
+
+    await ensureUserProfilePhotosTable();
+    const saved = await query(
+      `INSERT INTO user_profile_photos (user_id, image_data, mime_type, file_size, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id)
+       DO UPDATE
+       SET image_data = EXCLUDED.image_data,
+           mime_type = EXCLUDED.mime_type,
+           file_size = EXCLUDED.file_size,
+           updated_at = NOW()
+       RETURNING updated_at`,
+      [req.authUser.id, parsed.dataUrl, parsed.mimeType, parsed.bytes],
+    );
+
+    return res.status(201).json({
+      message: "Profile photo updated",
+      photoUrl: parsed.dataUrl,
+      updatedAt: saved.rows[0]?.updated_at || new Date().toISOString(),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to update profile photo", details: error.message });
+  }
+});
+
 app.post("/api/contact/submit", optionalAuth, async (req, res) => {
   try {
     // Accept contact submissions from guests or logged-in users.
@@ -1910,10 +2201,25 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "imageBase64 is required" });
     }
 
+    const requestedQuestionnaireData = isNonEmptyPlainObject(questionnaireData) ? questionnaireData : {};
+    let resolvedQuestionnaireData = requestedQuestionnaireData;
+    let questionnaireSource = "request";
+
+    if (!isNonEmptyPlainObject(resolvedQuestionnaireData)) {
+      const previousQuestionnaireData = await getLatestQuestionnaireDataForUser(userId, client);
+      if (isNonEmptyPlainObject(previousQuestionnaireData)) {
+        resolvedQuestionnaireData = previousQuestionnaireData;
+        questionnaireSource = "previous_assessment";
+      } else {
+        resolvedQuestionnaireData = {};
+        questionnaireSource = "none";
+      }
+    }
+
     // Start from questionnaire-based insights, then enrich with AI image analysis if available.
-    const questionnaireSkinType = determineSkinType(questionnaireData);
-    const questionnaireConditions = buildDetectedConditions(questionnaireData, questionnaireSkinType);
-    const imageInsights = await analyzeImageWithAI(imageBase64, questionnaireData);
+    const questionnaireSkinType = determineSkinType(resolvedQuestionnaireData);
+    const questionnaireConditions = buildDetectedConditions(resolvedQuestionnaireData, questionnaireSkinType);
+    const imageInsights = await analyzeImageWithAI(imageBase64, resolvedQuestionnaireData);
 
     const skinType = resolveFinalSkinType(
       questionnaireSkinType,
@@ -1931,7 +2237,8 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
     await client.query("BEGIN");
     const assessmentNotes = JSON.stringify({
       skinType,
-      questionnaireData,
+      questionnaireData: resolvedQuestionnaireData,
+      questionnaireSource,
       hasImage: Boolean(imageBase64),
       imageAnalysis: {
         used: imageAnalysisUsed,
@@ -1948,7 +2255,7 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
       [userId, assessmentNotes, overallScore],
     );
     const assessment = assessmentResult.rows[0];
-    await persistQuestionnaireAnswers(client, assessment.assessment_id, questionnaireData);
+    await persistQuestionnaireAnswers(client, assessment.assessment_id, resolvedQuestionnaireData);
     await persistSkinImage(client, assessment.assessment_id, userId, imageBase64);
 
     const summaryParts = [`Detected ${conditions.length} condition(s) for ${skinType} skin.`];
@@ -2044,6 +2351,7 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
           imageAnalysisUsed,
           imageProvider: imageInsights?.provider || null,
           confidence: analysisConfidence,
+          questionnaireSource,
         },
       },
     });
@@ -2088,14 +2396,7 @@ app.get("/api/assessments/history", authenticateToken, async (req, res) => {
         [assessment.assessment_id],
       );
 
-      let skinType = "Unknown";
-      if (assessment.notes) {
-        try {
-          skinType = JSON.parse(assessment.notes).skinType || "Unknown";
-        } catch (_error) {
-          skinType = "Unknown";
-        }
-      }
+      const skinType = parseSkinTypeFromAssessmentNotes(assessment.notes);
 
       history.push({
         id: assessment.assessment_id,
@@ -2114,6 +2415,73 @@ app.get("/api/assessments/history", authenticateToken, async (req, res) => {
     return res.json({ history });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch assessment history", details: error.message });
+  }
+});
+
+app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) => {
+  try {
+    // Build weekly progress strictly from authenticated user's own assessments.
+    const userId = req.authUser.id;
+    let assessmentsResult;
+    try {
+      assessmentsResult = await query(
+        `SELECT sa.assessment_id,
+                sa.assessment_date,
+                sa.overall_score,
+                sa.notes,
+                COALESCE(condition_rollup.condition_count, 0)::int AS condition_count,
+                COALESCE(condition_rollup.condition_burden, 0)::int AS condition_burden
+         FROM skin_assessments sa
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*)::int AS condition_count,
+                  COALESCE(
+                    SUM(
+                      CASE LOWER(dc.severity_level)
+                        WHEN 'severe' THEN 3
+                        WHEN 'moderate' THEN 2
+                        ELSE 1
+                      END
+                    ),
+                    0
+                  )::int AS condition_burden
+           FROM ai_analyses aa
+           JOIN ai_detected_conditions dc ON dc.analysis_id = aa.analysis_id
+           WHERE aa.assessment_id = sa.assessment_id
+         ) condition_rollup ON TRUE
+         WHERE sa.user_id = $1
+         ORDER BY sa.assessment_date DESC`,
+        [userId],
+      );
+    } catch (rollupError) {
+      // Keep weekly tracking available even if some analysis tables/columns differ in legacy DBs.
+      console.warn("[weekly-progress] condition rollup unavailable, using fallback:", rollupError.message);
+      assessmentsResult = await query(
+        `SELECT sa.assessment_id,
+                sa.assessment_date,
+                sa.overall_score,
+                sa.notes,
+                0::int AS condition_count,
+                0::int AS condition_burden
+         FROM skin_assessments sa
+         WHERE sa.user_id = $1
+         ORDER BY sa.assessment_date DESC`,
+        [userId],
+      );
+    }
+
+    const assessments = assessmentsResult.rows.map((row) => ({
+      id: row.assessment_id,
+      date: row.assessment_date,
+      score: Number(row.overall_score || 0),
+      skinType: parseSkinTypeFromAssessmentNotes(row.notes),
+      conditionCount: Number(row.condition_count || 0),
+      conditionBurden: Number(row.condition_burden || 0),
+    }));
+
+    const weeklyProgress = buildWeeklyProgressPayload(assessments);
+    return res.json(weeklyProgress);
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch weekly progress", details: error.message });
   }
 });
 
@@ -2387,6 +2755,7 @@ app.delete("/api/admin/users/:id", async (req, res) => {
 app.get("/api/admin/support-messages", async (req, res) => {
   try {
     const normalizedStatus = req.query.status ? normalizeSupportStatus(req.query.status) : null;
+    const messageType = normalizeSupportMessageType(req.query.type);
     const parsedLimit = Number.parseInt(String(req.query.limit || "100"), 10);
     const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 100;
 
@@ -2394,22 +2763,31 @@ app.get("/api/admin/support-messages", async (req, res) => {
       `SELECT support_id, user_id, name, email, subject, message, status, created_at
        FROM support_messages
        WHERE ($1::text IS NULL OR COALESCE(status, 'OPEN') = $1)
+         AND (
+           $2::text = 'all'
+           OR ($2::text = 'feedback' AND COALESCE(subject, '') ILIKE 'Client Feedback (%')
+           OR ($2::text = 'contact' AND COALESCE(subject, '') NOT ILIKE 'Client Feedback (%')
+         )
        ORDER BY created_at DESC
-       LIMIT $2`,
-      [normalizedStatus, limit],
+       LIMIT $3`,
+      [normalizedStatus, messageType, limit],
     );
 
     return res.json({
-      messages: result.rows.map((row) => ({
-        id: row.support_id,
-        userId: row.user_id,
-        name: row.name,
-        email: row.email,
-        subject: row.subject,
-        message: row.message,
-        status: String(row.status || "OPEN").toLowerCase(),
-        createdAt: row.created_at,
-      })),
+      messages: result.rows.map((row) => {
+        const isFeedback = /^client feedback \(/i.test(String(row.subject || "").trim());
+        return {
+          id: row.support_id,
+          userId: row.user_id,
+          name: row.name,
+          email: row.email,
+          subject: row.subject,
+          message: row.message,
+          status: String(row.status || "OPEN").toLowerCase(),
+          type: isFeedback ? "feedback" : "contact",
+          createdAt: row.created_at,
+        };
+      }),
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch support messages", details: error.message });
