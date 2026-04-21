@@ -34,3 +34,6 @@ backend/uploads/
 
 # Large trained artifacts (store outside git)
 backend/models/*.joblib
+
+# Local DB dumps
+db_data_only.sql
