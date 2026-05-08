@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from image_model_training import load_image_model_artifact, predict_image_insights, train_and_save_image_models
 from model_training import FEATURE_COLUMNS, TARGET_LEVEL_COLUMNS, load_model_artifact, normalize_skin_type, train_and_save_models
 
 
@@ -27,6 +28,7 @@ def _env_path(name: str, fallback: Path) -> Path:
 API_PORT = int(os.getenv("AI_SERVICE_PORT", "8000"))
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("AI_ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 AUTO_TRAIN_ON_START = os.getenv("AI_AUTO_TRAIN_ON_START", "true").strip().lower() == "true"
+AUTO_TRAIN_IMAGE_ON_START = os.getenv("AI_AUTO_TRAIN_IMAGE_ON_START", "false").strip().lower() == "true"
 
 MASTER_DATASET_PATH = _env_path(
     "MASTER_DATASET_PATH",
@@ -47,6 +49,19 @@ ROUTINES_DATASET_PATH = _env_path(
 MODEL_ARTIFACT_PATH = _env_path(
     "AI_MODEL_ARTIFACT_PATH",
     MODELS_DIR / "skincare_models.joblib",
+)
+DEFAULT_IMAGE_DATASET_ROOT = Path(r"C:\Users\Khaled\Desktop\Dataset Skincare")
+IMAGE_CONCERN_DATASET_PATH = _env_path(
+    "AI_IMAGE_CONCERN_DATASET_PATH",
+    DEFAULT_IMAGE_DATASET_ROOT / "data2" / "dataset",
+)
+IMAGE_SKIN_TYPE_DATASET_PATH = _env_path(
+    "AI_IMAGE_SKIN_TYPE_DATASET_PATH",
+    DEFAULT_IMAGE_DATASET_ROOT / "data3" / "Oily-Dry-Skin-Types",
+)
+IMAGE_MODEL_ARTIFACT_PATH = _env_path(
+    "AI_IMAGE_MODEL_ARTIFACT_PATH",
+    MODELS_DIR / "skincare_image_models.joblib",
 )
 
 
@@ -77,6 +92,13 @@ class PredictRequest(BaseModel):
 
 class TrainRequest(BaseModel):
     reason: str | None = None
+
+
+class TrainImageRequest(BaseModel):
+    reason: str | None = None
+    max_images_per_class: int = Field(default=650, ge=100, le=5000)
+    near_duplicate_hamming: int = Field(default=-1, ge=-1, le=16)
+    min_image_dim: int = Field(default=64, ge=32, le=512)
 
 
 class DatasetStore:
@@ -271,8 +293,105 @@ class ModelService:
         }
 
 
+class ImageModelService:
+    def __init__(
+        self,
+        concern_dataset_path: Path,
+        skin_type_dataset_path: Path,
+        model_artifact_path: Path,
+        auto_train_on_start: bool = False,
+    ) -> None:
+        self.concern_dataset_path = concern_dataset_path
+        self.skin_type_dataset_path = skin_type_dataset_path
+        self.model_artifact_path = model_artifact_path
+        self.artifact: dict[str, Any] | None = None
+        self.last_error: str | None = None
+
+        if self.model_artifact_path.exists():
+            self.reload()
+        elif auto_train_on_start and self.concern_dataset_path.exists() and self.skin_type_dataset_path.exists():
+            self.train(reason="auto_train_image_on_start")
+
+    def reload(self) -> None:
+        self.artifact = load_image_model_artifact(self.model_artifact_path)
+        self.last_error = None
+
+    def train(
+        self,
+        reason: str | None = None,
+        max_images_per_class: int = 650,
+        near_duplicate_hamming: int = -1,
+        min_image_dim: int = 64,
+    ) -> dict[str, Any]:
+        artifact = train_and_save_image_models(
+            concern_dataset_path=self.concern_dataset_path,
+            skin_type_dataset_path=self.skin_type_dataset_path,
+            model_artifact_path=self.model_artifact_path,
+            max_images_per_class=max_images_per_class,
+            near_duplicate_hamming=near_duplicate_hamming,
+            min_image_dim=min_image_dim,
+        )
+        self.artifact = artifact
+        self.last_error = None
+        return {
+            "status": "trained",
+            "reason": reason or "manual",
+            "image_model_artifact_path": str(self.model_artifact_path),
+            "trained_at": artifact.get("trained_at"),
+            "metrics": artifact.get("metrics", {}),
+            "concern_dataset_path": str(self.concern_dataset_path),
+            "skin_type_dataset_path": str(self.skin_type_dataset_path),
+        }
+
+    def predict(self, image_bytes: bytes) -> dict[str, Any] | None:
+        if not self.artifact:
+            return None
+        return predict_image_insights(self.artifact, image_bytes)
+
+    def status(self) -> dict[str, Any]:
+        status = {
+            "loaded": bool(self.artifact),
+            "image_model_artifact_path": str(self.model_artifact_path),
+            "concern_dataset_path": str(self.concern_dataset_path),
+            "skin_type_dataset_path": str(self.skin_type_dataset_path),
+            "datasets_available": bool(self.concern_dataset_path.exists() and self.skin_type_dataset_path.exists()),
+            "last_error": self.last_error,
+        }
+        if self.artifact:
+            status.update(
+                {
+                    "trained_at": self.artifact.get("trained_at"),
+                    "metrics": self.artifact.get("metrics", {}),
+                }
+            )
+        return status
+
+
+def fuse_scores(questionnaire_scores: dict[str, int], image_scores: dict[str, int], image_weight: float = 0.4) -> dict[str, int]:
+    fused = dict(questionnaire_scores)
+    clamped_weight = max(0.0, min(0.8, image_weight))
+    base_weight = 1.0 - clamped_weight
+
+    for key, question_score in questionnaire_scores.items():
+        image_score = image_scores.get(key)
+        if image_score is None:
+            continue
+        fused[key] = clamp_level(round((question_score * base_weight) + (image_score * clamped_weight)), default=question_score)
+
+    for key in ["dark_spots", "pigmentation", "pores", "wrinkles"]:
+        if key in image_scores and image_scores[key] >= 2:
+            fused[key] = clamp_level(image_scores[key], default=0)
+    return fused
+
+
 STORE = DatasetStore()
 MODEL_SERVICE = ModelService(MASTER_DATASET_PATH, MODEL_ARTIFACT_PATH, auto_train_on_start=AUTO_TRAIN_ON_START)
+IMAGE_MODEL_SERVICE = ImageModelService(
+    concern_dataset_path=IMAGE_CONCERN_DATASET_PATH,
+    skin_type_dataset_path=IMAGE_SKIN_TYPE_DATASET_PATH,
+    model_artifact_path=IMAGE_MODEL_ARTIFACT_PATH,
+    auto_train_on_start=AUTO_TRAIN_IMAGE_ON_START,
+)
 
 
 def extract_image_bytes(raw_image: str | None) -> bytes | None:
@@ -302,6 +421,10 @@ def build_conditions(scores: dict[str, int], image_bytes: bytes | None) -> list[
         "sensitivity": ("Sensitivity profile inferred by the model.", "General"),
         "dehydration": ("Hydration barrier support may be needed.", "General"),
         "mature": ("Mature-skin support may be beneficial.", "Eyes/Forehead"),
+        "dark_spots": ("Dark-spot signal inferred by trained image classes.", "Cheeks"),
+        "pigmentation": ("Pigmentation concern inferred by trained image classes.", "Cheeks"),
+        "pores": ("Enlarged pore pattern inferred from image classes.", "T-zone"),
+        "wrinkles": ("Wrinkle pattern inferred from image classes.", "Eyes/Forehead"),
     }
 
     conditions: list[dict[str, Any]] = []
@@ -389,7 +512,10 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "service": "skincare-fastapi",
         "port": API_PORT,
-        "model": MODEL_SERVICE.status(),
+        "models": {
+            "questionnaire": MODEL_SERVICE.status(),
+            "image": IMAGE_MODEL_SERVICE.status(),
+        },
     }
 
 
@@ -487,15 +613,35 @@ def predict(payload: PredictRequest) -> dict[str, Any]:
 
     model_prediction = MODEL_SERVICE.predict(questionnaire)
     skin_type = model_prediction["skin_type"]
-    scores = model_prediction["scores"]
+    scores = dict(model_prediction["scores"])
     confidence = model_prediction["confidence"]
+    image_model_used = False
+    image_prediction: dict[str, Any] | None = None
+
+    if image_bytes and IMAGE_MODEL_SERVICE.artifact:
+        image_prediction = IMAGE_MODEL_SERVICE.predict(image_bytes)
+        if image_prediction:
+            image_model_used = True
+            scores = fuse_scores(scores, image_prediction.get("scores", {}), image_weight=0.4)
+            image_skin_type = normalize_skin_type(image_prediction.get("skin_type"))
+            image_skin_type_confidence = float(image_prediction.get("skin_type_confidence", 0.0))
+            if image_skin_type and image_skin_type_confidence >= 0.72:
+                skin_type = image_skin_type
+            confidence = round(max(confidence, float(image_prediction.get("confidence", confidence))), 2)
+
     conditions = build_conditions(scores, image_bytes)
     recommendation_match = match_recommendation(skin_type, scores)
 
-    summary = (
-        f"Model inference completed. Estimated skin type: {skin_type}. "
-        "Concern levels were produced by trained classifiers/regressors."
-    )
+    if image_model_used:
+        summary = (
+            f"Model inference completed. Estimated skin type: {skin_type}. "
+            "Concern levels were fused from questionnaire + trained image classifiers."
+        )
+    else:
+        summary = (
+            f"Model inference completed. Estimated skin type: {skin_type}. "
+            "Concern levels were produced by trained questionnaire models."
+        )
 
     return {
         "skinType": skin_type,
@@ -505,21 +651,47 @@ def predict(payload: PredictRequest) -> dict[str, Any]:
         "recommendationMatch": recommendation_match,
         "meta": {
             "model_artifact_path": str(MODEL_ARTIFACT_PATH),
+            "image_model_artifact_path": str(IMAGE_MODEL_ARTIFACT_PATH),
             "trained_at": MODEL_SERVICE.status().get("trained_at"),
             "service_mode": "trained_model",
             "used_image_signal": bool(image_bytes),
+            "image_model_used": image_model_used,
+            "image_skin_type_confidence": image_prediction.get("skin_type_confidence") if image_prediction else None,
         },
     }
 
 
 @app.get("/training/status")
 def training_status() -> dict[str, Any]:
-    return MODEL_SERVICE.status()
+    return {
+        "questionnaire_model": MODEL_SERVICE.status(),
+        "image_model": IMAGE_MODEL_SERVICE.status(),
+    }
 
 
 @app.post("/training/start")
 def training_start(payload: TrainRequest) -> dict[str, Any]:
     return MODEL_SERVICE.train(payload.reason)
+
+
+@app.get("/training/image-status")
+def training_image_status() -> dict[str, Any]:
+    return IMAGE_MODEL_SERVICE.status()
+
+
+@app.post("/training/image-start")
+def training_image_start(payload: TrainImageRequest) -> dict[str, Any]:
+    try:
+        result = IMAGE_MODEL_SERVICE.train(
+            payload.reason,
+            max_images_per_class=payload.max_images_per_class,
+            near_duplicate_hamming=payload.near_duplicate_hamming,
+            min_image_dim=payload.min_image_dim,
+        )
+        return result
+    except Exception as error:
+        IMAGE_MODEL_SERVICE.last_error = str(error)
+        raise HTTPException(status_code=500, detail=f"Image model training failed: {error}") from error
 
 
 if __name__ == "__main__":

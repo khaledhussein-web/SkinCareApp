@@ -85,3 +85,24 @@ Main endpoints:
 - `POST /api/auth/reset-password`
 
 The frontend auth context now calls these backend endpoints instead of mock local-only auth.
+
+## 6) Ollama chatbot setup
+
+1. Install Ollama and run the local server:
+   - `ollama serve`
+2. Pull a chat model (example):
+   - `ollama pull llama3.1:8b`
+3. In `backend/.env`, set:
+   - `CHAT_AI_PROVIDER=ollama`
+   - `OLLAMA_BASE_URL=http://127.0.0.1:11434`
+   - `OLLAMA_MODEL=llama3:latest`
+   - `OLLAMA_TIMEOUT_MS=150000`
+   - `OLLAMA_MAX_TOKENS=400`
+   - `OLLAMA_CONTEXT_TOKENS=4096`
+   - `OLLAMA_CONTINUATION_MAX_ROUNDS=1`
+   - `OLLAMA_CONTINUATION_TOKENS=220`
+4. Restart backend:
+   - `cd backend && npm run dev`
+
+If `/api/chat` fails for your model template, backend automatically retries via Ollama `/api/generate`.
+On CPU-only machines, detailed answers can take 20-90 seconds.

@@ -11,7 +11,13 @@ import { fetchChatContext, fetchChatMessages, sendChatMessage } from "@/app/serv
 import { Send, Bot, User } from "lucide-react";
 
 export const ChatScreen = () => {
-  const { analysisResult, chatConversationId, setChatConversationId } = useSkinCare();
+  const {
+    analysisResult,
+    chatConversationId,
+    setChatConversationId,
+    forceNewChatSession,
+    setForceNewChatSession,
+  } = useSkinCare();
   const { user } = useAuth();
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
@@ -52,6 +58,13 @@ export const ChatScreen = () => {
     // Load latest or selected conversation for the authenticated user.
     const loadMessages = async () => {
       if (!user?.id) return;
+      if (!chatConversationId && forceNewChatSession) {
+        // New assessment should start with a fresh empty chat session.
+        setMessages([]);
+        setError("");
+        setLoading(false);
+        return;
+      }
       setLoading(true);
       setError("");
       try {
@@ -74,7 +87,7 @@ export const ChatScreen = () => {
     };
 
     loadMessages();
-  }, [chatConversationId, setChatConversationId, user?.id]);
+  }, [chatConversationId, forceNewChatSession, setChatConversationId, user?.id]);
 
   const handleSend = async () => {
     // Send message to backend and append both user + AI messages from response.
@@ -93,6 +106,9 @@ export const ChatScreen = () => {
 
       if (response.conversationId) {
         setChatConversationId(response.conversationId);
+        if (forceNewChatSession) {
+          setForceNewChatSession(false);
+        }
       }
       if (response.assessmentContext) {
         setAssessmentContext(response.assessmentContext);
@@ -294,7 +310,7 @@ export const ChatScreen = () => {
                 />
                 <Button
                   onClick={handleSend}
-                  disabled={!inputValue.trim() || isTyping || loading}
+                  disabled={!inputValue.trim() || isTyping || loading || contextLoading}
                   className="rounded-full bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 text-white px-4 sm:px-6"
                 >
                   <Send className="w-4 h-4" />

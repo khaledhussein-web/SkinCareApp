@@ -15,6 +15,7 @@ export const AnalyzingScreen = () => {
     setAnalysisResult,
     setLatestAssessmentId,
     setChatConversationId,
+    setForceNewChatSession,
   } = useSkinCare();
   const [error, setError] = useState("");
 
@@ -39,6 +40,7 @@ export const AnalyzingScreen = () => {
         setAnalysisResult(response.result);
         setLatestAssessmentId(response.assessmentId);
         setChatConversationId(null);
+        setForceNewChatSession(true);
         navigate("/results");
       } catch (analysisError) {
         setError(analysisError instanceof Error ? analysisError.message : "Analysis failed");
@@ -52,6 +54,7 @@ export const AnalyzingScreen = () => {
     setAnalysisResult,
     setLatestAssessmentId,
     setChatConversationId,
+    setForceNewChatSession,
     uploadedImage,
     user?.id,
   ]);

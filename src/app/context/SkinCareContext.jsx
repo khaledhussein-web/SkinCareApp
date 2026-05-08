@@ -10,6 +10,7 @@ export const SkinCareProvider = ({ children }) => {
   const [analysisResult, setAnalysisResult] = useState(null);
   const [latestAssessmentId, setLatestAssessmentId] = useState(null);
   const [chatConversationId, setChatConversationId] = useState(null);
+  const [forceNewChatSession, setForceNewChatSession] = useState(false);
   const previousUserIdRef = useRef(null);
 
   const resetSkinCareState = () => {
@@ -18,6 +19,7 @@ export const SkinCareProvider = ({ children }) => {
     setAnalysisResult(null);
     setLatestAssessmentId(null);
     setChatConversationId(null);
+    setForceNewChatSession(false);
   };
 
   useEffect(() => {
@@ -43,6 +45,8 @@ export const SkinCareProvider = ({ children }) => {
         setLatestAssessmentId,
         chatConversationId,
         setChatConversationId,
+        forceNewChatSession,
+        setForceNewChatSession,
         resetSkinCareState,
       }}
     >
