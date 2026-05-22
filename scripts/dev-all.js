@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,7 +42,7 @@ function wireStream(child, label) {
   });
 }
 
-function launch(name, command, args, cwd) {
+function launch(name, command, args, cwd, envOverrides = {}) {
   if (dryRun) {
     log("system", `DRY RUN -> ${name}: (${cwd}) ${command} ${args.join(" ")}`);
     return null;
@@ -50,7 +51,7 @@ function launch(name, command, args, cwd) {
   log("system", `Starting ${name}...`);
   const child = spawn(command, args, {
     cwd,
-    env: process.env,
+    env: { ...process.env, ...envOverrides },
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
   });
@@ -71,6 +72,47 @@ function launch(name, command, args, cwd) {
   });
 
   return child;
+}
+
+function canListenOnHost(port, host) {
+  return new Promise((resolve) => {
+    const tester = net.createServer();
+    let settled = false;
+    tester.unref();
+    tester.once("error", () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    });
+    tester.listen(port, host, () => {
+      tester.close(() => {
+        if (!settled) {
+          settled = true;
+          resolve(true);
+        }
+      });
+    });
+  });
+}
+
+async function canListen(port) {
+  const hosts = [undefined, "0.0.0.0", "::", "127.0.0.1", "::1"];
+  for (const host of hosts) {
+    if (!(await canListenOnHost(port, host))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function findAvailablePort(startPort) {
+  for (let port = startPort; port < startPort + 100; port += 1) {
+    if (await canListen(port)) {
+      return port;
+    }
+  }
+  throw new Error(`No available port found from ${startPort} to ${startPort + 99}`);
 }
 
 function terminateProcessTree(pid) {
@@ -106,14 +148,59 @@ async function shutdown(exitCode = 0) {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-const frontend = launch("frontend", nodeCmd, [viteCli], rootDir);
-const backend = launch("backend", nodeCmd, ["--watch", "server.js"], backendDir);
-const fastapi = launch("fastapi", pythonCmd, ["fastapi_service.py"], backendDir);
+async function main() {
+  const frontendPort = Number(process.env.VITE_PORT) || (await findAvailablePort(5173));
+  const backendPort = Number(process.env.PORT) || (await findAvailablePort(5000));
+  const fastapiPort = Number(process.env.AI_SERVICE_PORT) || (await findAvailablePort(8000));
+  const frontendOrigin = `http://localhost:${frontendPort}`;
+  const backendOrigin = `http://localhost:${backendPort}`;
+  const fastapiOrigin = `http://localhost:${fastapiPort}`;
 
-if (dryRun) {
-  process.exit(0);
+  log("system", `Frontend: ${frontendOrigin}`);
+  log("system", `Backend: ${backendOrigin}`);
+  log("system", `FastAPI: ${fastapiOrigin}`);
+
+  const frontend = launch(
+    "frontend",
+    nodeCmd,
+    [viteCli, "--port", String(frontendPort), "--strictPort"],
+    rootDir,
+    {
+      VITE_API_BASE_URL: process.env.VITE_API_BASE_URL || backendOrigin,
+    },
+  );
+  const backend = launch(
+    "backend",
+    nodeCmd,
+    ["--watch", "server.js"],
+    backendDir,
+    {
+      PORT: String(backendPort),
+      FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || frontendOrigin,
+      IMAGE_ANALYSIS_ENDPOINT: process.env.IMAGE_ANALYSIS_ENDPOINT || `${fastapiOrigin}/predict`,
+    },
+  );
+  const fastapi = launch(
+    "fastapi",
+    pythonCmd,
+    ["fastapi_service.py"],
+    backendDir,
+    {
+      AI_SERVICE_PORT: String(fastapiPort),
+      AI_ALLOWED_ORIGINS: process.env.AI_ALLOWED_ORIGINS || frontendOrigin,
+    },
+  );
+
+  if (dryRun) {
+    process.exit(0);
+  }
+
+  if (!frontend || !backend || !fastapi) {
+    shutdown(1);
+  }
 }
 
-if (!frontend || !backend || !fastapi) {
+main().catch((error) => {
+  log("system", error.message);
   shutdown(1);
-}
+});

@@ -1,5 +1,5 @@
 -- ============================================================
--- Personalized Skincare Web App - Current Backend Schema
+-- Glorielle - Current Backend Schema
 -- Source of truth for `npm run db:init`
 -- ============================================================
 

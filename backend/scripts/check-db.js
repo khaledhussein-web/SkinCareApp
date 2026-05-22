@@ -1,5 +1,6 @@
-const { pool } = require("../db");
+﻿const { pool } = require("../db");
 
+// Explains what `main` does in the backend API flow.
 async function main() {
   const basic = await pool.query(
     "SELECT current_database() AS database_name, current_user AS database_user, NOW() AS server_time",

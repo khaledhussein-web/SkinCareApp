@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import binascii
@@ -20,6 +20,7 @@ DATA_DIR = BASE_DIR / "data" / "merged"
 MODELS_DIR = BASE_DIR / "models"
 
 
+# Reads an optional environment variable path and falls back to the project default path.
 def _env_path(name: str, fallback: Path) -> Path:
     value = os.getenv(name, "").strip()
     return Path(value) if value else fallback
@@ -65,10 +66,12 @@ IMAGE_MODEL_ARTIFACT_PATH = _env_path(
 )
 
 
+# Normalizes text used for product, routine, and recommendation matching.
 def _clean_text(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+# Keeps model concern scores inside the valid 0 to 5 range.
 def clamp_level(value: Any, default: int = 2) -> int:
     try:
         number = int(float(value))
@@ -77,6 +80,7 @@ def clamp_level(value: Any, default: int = 2) -> int:
     return max(0, min(5, number))
 
 
+# Converts a numeric concern score into a readable severity label for the frontend.
 def score_to_severity(score: int) -> str:
     if score >= 4:
         return "severe"
@@ -85,11 +89,13 @@ def score_to_severity(score: int) -> str:
     return "mild"
 
 
+# Defines the JSON body accepted by the /predict endpoint.
 class PredictRequest(BaseModel):
     imageBase64: str | None = None
     questionnaireData: dict[str, Any] = Field(default_factory=dict)
 
 
+# Defines the optional JSON body accepted when manually starting training.
 class TrainRequest(BaseModel):
     reason: str | None = None
 
@@ -101,7 +107,9 @@ class TrainImageRequest(BaseModel):
     min_image_dim: int = Field(default=64, ge=32, le=512)
 
 
+# Loads and normalizes the merged CSV datasets used by FastAPI.
 class DatasetStore:
+    # Loads all merged datasets into memory when the FastAPI service starts.
     def __init__(self) -> None:
         self.master_df = self._load_dataset(MASTER_DATASET_PATH)
         self.recommendations_df = self._load_dataset(RECOMMENDATIONS_DATASET_PATH)
@@ -110,11 +118,13 @@ class DatasetStore:
         self._normalize_datasets()
 
     @staticmethod
+    # Reads a dataset from disk and fails early if the CSV is missing.
     def _load_dataset(path: Path) -> pd.DataFrame:
         if not path.exists():
             raise FileNotFoundError(f"Dataset was not found: {path}")
         return pd.read_csv(path)
 
+    # Standardizes dataset values so later filtering and matching are reliable.
     def _normalize_datasets(self) -> None:
         if "skin_type" in self.master_df.columns:
             self.master_df["skin_type"] = self.master_df["skin_type"].map(normalize_skin_type)
@@ -138,6 +148,7 @@ class DatasetStore:
         if "product_name" in self.products_df.columns:
             self.products_df["product_name"] = self.products_df["product_name"].fillna("").astype(str)
 
+    # Returns dataset paths, row counts, and columns for debugging or presentation.
     def summary(self) -> dict[str, Any]:
         return {
             "master_questionnaire_prediction": {
@@ -163,7 +174,9 @@ class DatasetStore:
         }
 
 
+# Manages model loading, retraining, prediction, and training status.
 class ModelService:
+    # Loads the saved model artifact, or trains a new one automatically if configured.
     def __init__(self, master_dataset_path: Path, model_artifact_path: Path, auto_train_on_start: bool = True) -> None:
         self.master_dataset_path = master_dataset_path
         self.model_artifact_path = model_artifact_path
@@ -178,9 +191,11 @@ class ModelService:
                 "Set AI_AUTO_TRAIN_ON_START=true or call /training/start."
             )
 
+    # Reloads the trained artifact from disk into memory.
     def reload(self) -> None:
         self.artifact = load_model_artifact(self.model_artifact_path)
 
+    # Starts training from the master dataset and stores the new artifact for predictions.
     def train(self, reason: str | None = None) -> dict[str, Any]:
         artifact = train_and_save_models(self.master_dataset_path, self.model_artifact_path)
         self.artifact = artifact
@@ -192,6 +207,7 @@ class ModelService:
             "metrics": artifact.get("metrics", {}),
         }
 
+    # Maps frontend questionnaire field names and values into the exact training feature columns.
     def _frontend_value_to_feature(self, questionnaire: dict[str, Any]) -> dict[str, Any]:
         after_cleansing_map = {
             "tight": "tight",
@@ -245,6 +261,7 @@ class ModelService:
             feature_row[key] = str(feature_row.get(key, "unknown") or "unknown").strip()
         return feature_row
 
+    # Runs the trained models and returns skin type, concern scores, and confidence.
     def predict(self, questionnaire: dict[str, Any]) -> dict[str, Any]:
         if not self.artifact:
             raise RuntimeError("Model artifact is not loaded.")
@@ -282,6 +299,7 @@ class ModelService:
             "confidence": round(max(0.5, min(0.98, confidence)), 2),
         }
 
+    # Reports whether a model is loaded and what metrics were saved during training.
     def status(self) -> dict[str, Any]:
         if not self.artifact:
             return {"loaded": False, "model_artifact_path": str(self.model_artifact_path)}
@@ -394,6 +412,7 @@ IMAGE_MODEL_SERVICE = ImageModelService(
 )
 
 
+# Decodes an optional base64 image so the response can note that image signal was included.
 def extract_image_bytes(raw_image: str | None) -> bytes | None:
     if not raw_image:
         return None
@@ -411,6 +430,7 @@ def extract_image_bytes(raw_image: str | None) -> bytes | None:
         return None
 
 
+# Converts model concern scores into frontend-friendly condition cards.
 def build_conditions(scores: dict[str, int], image_bytes: bytes | None) -> list[dict[str, Any]]:
     image_bonus = 0.04 if image_bytes else 0.0
     templates = {
@@ -456,6 +476,7 @@ def build_conditions(scores: dict[str, int], image_bytes: bytes | None) -> list[
     return conditions
 
 
+# Finds the closest recommendation rule for the predicted skin type and concern scores.
 def match_recommendation(skin_type: str, scores: dict[str, int]) -> dict[str, Any] | None:
     df = STORE.recommendations_df
     subset = df[df["skin_type"] == skin_type].copy()
@@ -507,6 +528,7 @@ app.add_middleware(
 
 
 @app.get("/health")
+# Health endpoint used to confirm FastAPI and the model are available.
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
@@ -520,11 +542,13 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/datasets/summary")
+# Returns a quick summary of the loaded datasets.
 def datasets_summary() -> dict[str, Any]:
     return STORE.summary()
 
 
 @app.get("/recommendations/match")
+# API endpoint that matches a skin profile to cleanser, moisturizer, serum, SPF, and treatment.
 def recommendations_match(
     skin_type: str = Query("normal"),
     acne_level_0_5: int = Query(0, ge=0, le=5),
@@ -549,6 +573,7 @@ def recommendations_match(
 
 
 @app.get("/products/search")
+# API endpoint that filters the product dataset by search text, skin type, concern, or category.
 def products_search(
     q: str | None = Query(default=None),
     skin_type: str | None = Query(default=None),
@@ -575,6 +600,7 @@ def products_search(
 
 
 @app.get("/routines/match")
+# API endpoint that returns the closest AM/PM skincare routine for the provided scores.
 def routines_match(
     skin_type: str = Query("normal"),
     acne_level_0_5: int = Query(0, ge=0, le=5),
@@ -607,6 +633,7 @@ def routines_match(
 
 
 @app.post("/predict")
+# Main prediction endpoint used by the app after the questionnaire or image upload flow.
 def predict(payload: PredictRequest) -> dict[str, Any]:
     questionnaire = payload.questionnaireData or {}
     image_bytes = extract_image_bytes(payload.imageBase64)
@@ -662,6 +689,7 @@ def predict(payload: PredictRequest) -> dict[str, Any]:
 
 
 @app.get("/training/status")
+# Shows the currently loaded model artifact and its training metrics.
 def training_status() -> dict[str, Any]:
     return {
         "questionnaire_model": MODEL_SERVICE.status(),
@@ -670,6 +698,7 @@ def training_status() -> dict[str, Any]:
 
 
 @app.post("/training/start")
+# Manually retrains the models from the merged master dataset.
 def training_start(payload: TrainRequest) -> dict[str, Any]:
     return MODEL_SERVICE.train(payload.reason)
 

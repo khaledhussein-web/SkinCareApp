@@ -1,4 +1,4 @@
-const path = require("path");
+﻿const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
@@ -12,6 +12,11 @@ dotenv.config({ path: path.resolve(__dirname, ".env") });
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+const ALLOWED_FRONTEND_ORIGINS = new Set(
+  FRONTEND_ORIGIN.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
 const JWT_SECRET = process.env.JWT_SECRET || "change_me_for_production";
 const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || "15m";
 const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || `${JWT_SECRET}_refresh`;
@@ -30,7 +35,7 @@ const WEB3FORMS_ACCESS_KEY = process.env.WEB3FORMS_ACCESS_KEY || "";
 const WEB3FORMS_ENDPOINT = String(process.env.WEB3FORMS_ENDPOINT || "https://api.web3forms.com/submit")
   .split("`n")[0]
   .trim();
-const WEB3FORMS_FROM_NAME = String(process.env.WEB3FORMS_FROM_NAME || "SkinCare AI Support")
+const WEB3FORMS_FROM_NAME = String(process.env.WEB3FORMS_FROM_NAME || "Glorielle Support")
   .split("`n")[0]
   .trim();
 const WEB3FORMS_TIMEOUT_MS = Number(process.env.WEB3FORMS_TIMEOUT_MS) || 10_000;
@@ -64,7 +69,15 @@ const PROFILE_PHOTO_MAX_BYTES = Math.max(100_000, Number(process.env.PROFILE_PHO
 
 app.use(
   cors({
-    origin: FRONTEND_ORIGIN,
+    origin(origin, callback) {
+      if (!origin || ALLOWED_FRONTEND_ORIGINS.has(origin)) {
+        return callback(null, true);
+      }
+      if (process.env.NODE_ENV !== "production" && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`CORS origin not allowed: ${origin}`));
+    },
     credentials: true,
     exposedHeaders: ["Content-Disposition", "Content-Length"],
   }),
@@ -73,6 +86,7 @@ app.use(
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: JSON_BODY_LIMIT }));
 
+// Explains what `createToken` does in the backend API flow.
 function createToken(user, sessionId) {
   // Issue a signed JWT that carries the user id, role, and session id for API authorization.
   return jwt.sign(
@@ -87,6 +101,7 @@ function createToken(user, sessionId) {
   );
 }
 
+// Explains what `extractBearerToken` does in the backend API flow.
 function extractBearerToken(authorizationHeader) {
   // Read "Authorization: Bearer <token>" and return only the token value.
   const [scheme, token] = String(authorizationHeader || "").split(" ");
@@ -96,6 +111,7 @@ function extractBearerToken(authorizationHeader) {
   return token;
 }
 
+// Explains what `createRefreshToken` does in the backend API flow.
 function createRefreshToken(userId, sessionId) {
   return jwt.sign(
     {
@@ -108,14 +124,17 @@ function createRefreshToken(userId, sessionId) {
   );
 }
 
+// Explains what `hashToken` does in the backend API flow.
 function hashToken(token) {
   return crypto.createHash("sha256").update(String(token || "")).digest("hex");
 }
 
+// Explains what `toRefreshExpiresAt` does in the backend API flow.
 function toRefreshExpiresAt() {
   return new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
 }
 
+// Explains what `parseCookies` does in the backend API flow.
 function parseCookies(cookieHeader) {
   const safeDecode = (value) => {
     try {
@@ -143,21 +162,25 @@ function parseCookies(cookieHeader) {
   return Object.fromEntries(entries);
 }
 
+// Explains what `getRefreshTokenFromRequest` does in the backend API flow.
 function getRefreshTokenFromRequest(req) {
   const cookies = parseCookies(req.headers.cookie);
   return cookies[REFRESH_COOKIE_NAME] || null;
 }
 
+// Explains what `getClientIp` does in the backend API flow.
 function getClientIp(req) {
   const xForwardedFor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
   return xForwardedFor || req.ip || req.socket?.remoteAddress || null;
 }
 
+// Explains what `normalizeUserAgent` does in the backend API flow.
 function normalizeUserAgent(userAgent) {
   const normalized = String(userAgent || "").trim();
   return normalized ? normalized.slice(0, 512) : null;
 }
 
+// Explains what `getRefreshCookieOptions` does in the backend API flow.
 function getRefreshCookieOptions(expiresAt) {
   return {
     httpOnly: true,
@@ -168,14 +191,17 @@ function getRefreshCookieOptions(expiresAt) {
   };
 }
 
+// Explains what `setRefreshTokenCookie` does in the backend API flow.
 function setRefreshTokenCookie(res, refreshToken, expiresAt) {
   res.cookie(REFRESH_COOKIE_NAME, refreshToken, getRefreshCookieOptions(expiresAt));
 }
 
+// Explains what `clearRefreshTokenCookie` does in the backend API flow.
 function clearRefreshTokenCookie(res) {
   res.clearCookie(REFRESH_COOKIE_NAME, getRefreshCookieOptions(new Date(0)));
 }
 
+// Explains what `resolveRequestUser` does in the backend API flow.
 async function resolveRequestUser(token) {
   // Decode JWT, then load the latest user state from DB (role/status can change after login).
   const decoded = jwt.verify(token, JWT_SECRET);
@@ -204,6 +230,7 @@ async function resolveRequestUser(token) {
   return toApiUser(result.rows[0]);
 }
 
+// Explains what `authenticateToken` does in the backend API flow.
 async function authenticateToken(req, res, next) {
   // Strict auth guard: request must include a valid token for an active, non-banned user.
   const token = extractBearerToken(req.headers.authorization);
@@ -232,6 +259,7 @@ async function authenticateToken(req, res, next) {
   }
 }
 
+// Explains what `optionalAuth` does in the backend API flow.
 async function optionalAuth(req, res, next) {
   // Soft auth guard: attach user if token exists; allow anonymous access if token is absent.
   const token = extractBearerToken(req.headers.authorization);
@@ -261,6 +289,7 @@ async function optionalAuth(req, res, next) {
   }
 }
 
+// Explains what `requireAdmin` does in the backend API flow.
 function requireAdmin(req, res, next) {
   // Role guard for admin-only routes.
   if ((req.authUser?.role || "").toLowerCase() !== "admin") {
@@ -269,10 +298,12 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
+// Explains what `normalizePhoneNumber` does in the backend API flow.
 function normalizePhoneNumber(value) {
   return String(value || "").replace(/[\s()-]/g, "");
 }
 
+// Explains what `toUserStatus` does in the backend API flow.
 function toUserStatus(userRow) {
   if (userRow.is_banned) {
     return "banned";
@@ -283,6 +314,7 @@ function toUserStatus(userRow) {
   return "active";
 }
 
+// Explains what `toApiUser` does in the backend API flow.
 function toApiUser(userRow) {
   return {
     id: userRow.user_id,
@@ -297,6 +329,7 @@ function toApiUser(userRow) {
   };
 }
 
+// Explains what `ensureRoleId` does in the backend API flow.
 async function ensureRoleId(roleName) {
   const existing = await query("SELECT role_id FROM roles WHERE LOWER(role_name) = LOWER($1)", [roleName]);
   if (existing.rowCount > 0) {
@@ -310,6 +343,7 @@ async function ensureRoleId(roleName) {
   return inserted.rows[0].role_id;
 }
 
+// Explains what `tableExists` does in the backend API flow.
 async function tableExists(tableName) {
   const result = await query(
     `SELECT 1
@@ -320,6 +354,7 @@ async function tableExists(tableName) {
   return result.rowCount > 0;
 }
 
+// Explains what `tableExistsInClient` does in the backend API flow.
 async function tableExistsInClient(client, tableName) {
   const result = await client.query(
     `SELECT 1
@@ -330,6 +365,7 @@ async function tableExistsInClient(client, tableName) {
   return result.rowCount > 0;
 }
 
+// Explains what `columnExists` does in the backend API flow.
 async function columnExists(tableName, columnName, client = null) {
   const runQuery = client ? client.query.bind(client) : query;
   const result = await runQuery(
@@ -345,6 +381,7 @@ async function columnExists(tableName, columnName, client = null) {
 
 let authSessionsTableReady = false;
 
+// Explains what `ensureAuthSessionsTable` does in the backend API flow.
 async function ensureAuthSessionsTable() {
   if (authSessionsTableReady) {
     return true;
@@ -381,6 +418,7 @@ async function ensureAuthSessionsTable() {
   return true;
 }
 
+// Explains what `createAuthSession` does in the backend API flow.
 async function createAuthSession({ userId, ipAddress = null, userAgent = null }) {
   await ensureAuthSessionsTable();
   const sessionId = crypto.randomUUID();
@@ -401,6 +439,7 @@ async function createAuthSession({ userId, ipAddress = null, userAgent = null })
   };
 }
 
+// Explains what `revokeUserSessions` does in the backend API flow.
 async function revokeUserSessions(userId, client = null) {
   const runQuery = client ? client.query.bind(client) : query;
   await runQuery(
@@ -413,6 +452,7 @@ async function revokeUserSessions(userId, client = null) {
   );
 }
 
+// Explains what `revokeSessionById` does in the backend API flow.
 async function revokeSessionById(sessionId, client = null) {
   if (!sessionId) {
     return;
@@ -427,6 +467,7 @@ async function revokeSessionById(sessionId, client = null) {
   );
 }
 
+// Explains what `ensurePasswordResetTokensTable` does in the backend API flow.
 async function ensurePasswordResetTokensTable() {
   const hasTable = await tableExists("password_reset_tokens");
   if (hasTable) return true;
@@ -444,6 +485,7 @@ async function ensurePasswordResetTokensTable() {
   return true;
 }
 
+// Explains what `getPasswordResetPrimaryKeyColumn` does in the backend API flow.
 async function getPasswordResetPrimaryKeyColumn(client = null) {
   const runQuery = client ? client.query.bind(client) : query;
   const result = await runQuery(
@@ -460,6 +502,7 @@ async function getPasswordResetPrimaryKeyColumn(client = null) {
 
 let userProfilePhotosTableReady = false;
 
+// Explains what `ensureUserProfilePhotosTable` does in the backend API flow.
 async function ensureUserProfilePhotosTable() {
   if (userProfilePhotosTableReady) {
     return true;
@@ -479,6 +522,7 @@ async function ensureUserProfilePhotosTable() {
   return true;
 }
 
+// Explains what `parseProfilePhotoDataUrl` does in the backend API flow.
 function parseProfilePhotoDataUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -516,10 +560,12 @@ function parseProfilePhotoDataUrl(value) {
   };
 }
 
+// Explains what `isNonEmptyPlainObject` does in the backend API flow.
 function isNonEmptyPlainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0);
 }
 
+// Explains what `getLatestQuestionnaireDataForUser` does in the backend API flow.
 async function getLatestQuestionnaireDataForUser(userId, client = null) {
   const runQuery = client ? client.query.bind(client) : query;
   const result = await runQuery(
@@ -547,6 +593,7 @@ async function getLatestQuestionnaireDataForUser(userId, client = null) {
   return {};
 }
 
+// Explains what `parseSkinTypeFromAssessmentNotes` does in the backend API flow.
 function parseSkinTypeFromAssessmentNotes(notes) {
   if (!notes) return "Unknown";
   try {
@@ -557,6 +604,7 @@ function parseSkinTypeFromAssessmentNotes(notes) {
   }
 }
 
+// Explains what `toWeekStartUtcDate` does in the backend API flow.
 function toWeekStartUtcDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
@@ -566,12 +614,14 @@ function toWeekStartUtcDate(value) {
   return normalized;
 }
 
+// Explains what `toDateOnlyString` does in the backend API flow.
 function toDateOnlyString(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date.toISOString().slice(0, 10);
 }
 
+// Explains what `toProgressStatus` does in the backend API flow.
 function toProgressStatus(currentWeek, previousWeek) {
   if (!previousWeek) {
     return {
@@ -616,6 +666,7 @@ function toProgressStatus(currentWeek, previousWeek) {
   };
 }
 
+// Explains what `buildWeeklyProgressPayload` does in the backend API flow.
 function buildWeeklyProgressPayload(assessments = []) {
   const weekMap = new Map();
 
@@ -801,6 +852,7 @@ const QUESTIONNAIRE_QUESTION_DEFINITIONS = [
   },
 ];
 
+// Explains what `ensureQuestionId` does in the backend API flow.
 async function ensureQuestionId(client, definition) {
   const existing = await client.query(
     `SELECT question_id
@@ -830,6 +882,7 @@ async function ensureQuestionId(client, definition) {
   return inserted.rows[0].question_id;
 }
 
+// Explains what `ensureQuestionOptionId` does in the backend API flow.
 async function ensureQuestionOptionId(client, questionId, option, displayOrder) {
   const existing = await client.query(
     `SELECT option_id
@@ -861,6 +914,7 @@ async function ensureQuestionOptionId(client, questionId, option, displayOrder) 
   return inserted.rows[0].option_id;
 }
 
+// Explains what `persistQuestionnaireAnswers` does in the backend API flow.
 async function persistQuestionnaireAnswers(client, assessmentId, questionnaireData = {}) {
   const hasQuestionsTable = await tableExistsInClient(client, "skin_questions");
   const hasOptionsTable = await tableExistsInClient(client, "question_options");
@@ -893,6 +947,7 @@ async function persistQuestionnaireAnswers(client, assessmentId, questionnaireDa
   }
 }
 
+// Explains what `determineSkinType` does in the backend API flow.
 function determineSkinType(questionnaireData = {}) {
   const selectedSkinType = normalizeSkinTypeCandidate(questionnaireData?.skinType);
   if (selectedSkinType) return selectedSkinType;
@@ -934,6 +989,7 @@ function determineSkinType(questionnaireData = {}) {
   return "Normal";
 }
 
+// Explains what `buildDetectedConditions` does in the backend API flow.
 function buildDetectedConditions(questionnaireData = {}, skinType = "Normal") {
   const conditions = [];
   const { afterCleansing, productReaction, middayFeeling, shineLevel, breakoutFrequency, skinTexture, endOfDay } =
@@ -1014,6 +1070,7 @@ function buildDetectedConditions(questionnaireData = {}, skinType = "Normal") {
   return conditions;
 }
 
+// Explains what `buildRecommendations` does in the backend API flow.
 function buildRecommendations(skinType, conditions) {
   const recommendations = [
     {
@@ -1080,6 +1137,7 @@ function buildRecommendations(skinType, conditions) {
   return recommendations;
 }
 
+// Explains what `normalizeSeverity` does in the backend API flow.
 function normalizeSeverity(severity) {
   const value = String(severity || "").toLowerCase().trim();
   if (value === "severe" || value === "high") return "severe";
@@ -1087,12 +1145,14 @@ function normalizeSeverity(severity) {
   return "mild";
 }
 
+// Explains what `severityWeight` does in the backend API flow.
 function severityWeight(severity) {
   if (severity === "severe") return 3;
   if (severity === "moderate") return 2;
   return 1;
 }
 
+// Explains what `normalizeSkinTypeCandidate` does in the backend API flow.
 function normalizeSkinTypeCandidate(value) {
   const normalized = String(value || "").toLowerCase().trim();
   if (!normalized) return null;
@@ -1108,12 +1168,14 @@ function normalizeSkinTypeCandidate(value) {
   return null;
 }
 
+// Explains what `clampConfidence` does in the backend API flow.
 function clampConfidence(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return null;
   return Math.max(0, Math.min(1, parsed));
 }
 
+// Explains what `extractJsonObject` does in the backend API flow.
 function extractJsonObject(text) {
   const value = String(text || "").trim();
   if (!value) return null;
@@ -1128,6 +1190,7 @@ function extractJsonObject(text) {
   }
 }
 
+// Explains what `ensureImageDataUrl` does in the backend API flow.
 function ensureImageDataUrl(imageBase64) {
   const value = String(imageBase64 || "").trim();
   if (!value) return null;
@@ -1135,6 +1198,7 @@ function ensureImageDataUrl(imageBase64) {
   return `data:image/jpeg;base64,${value}`;
 }
 
+// Explains what `estimateBase64Size` does in the backend API flow.
 function estimateBase64Size(base64Value) {
   const clean = String(base64Value || "").replace(/\s/g, "");
   if (!clean) return null;
@@ -1142,6 +1206,7 @@ function estimateBase64Size(base64Value) {
   return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
 }
 
+// Explains what `buildSkinImageMetadata` does in the backend API flow.
 function buildSkinImageMetadata(imageBase64, assessmentId) {
   const raw = String(imageBase64 || "").trim();
   if (!raw) return null;
@@ -1177,6 +1242,7 @@ function buildSkinImageMetadata(imageBase64, assessmentId) {
   };
 }
 
+// Explains what `persistSkinImage` does in the backend API flow.
 async function persistSkinImage(client, assessmentId, userId, imageBase64) {
   const hasImagesTable = await tableExistsInClient(client, "skin_images");
   if (!hasImagesTable) return;
@@ -1199,6 +1265,7 @@ async function persistSkinImage(client, assessmentId, userId, imageBase64) {
   );
 }
 
+// Explains what `normalizeImageConditions` does in the backend API flow.
 function normalizeImageConditions(conditions, sourceTag) {
   if (!Array.isArray(conditions)) return [];
 
@@ -1220,6 +1287,7 @@ function normalizeImageConditions(conditions, sourceTag) {
     .filter(Boolean);
 }
 
+// Explains what `normalizeImageInsights` does in the backend API flow.
 function normalizeImageInsights(raw, provider) {
   const skinType = normalizeSkinTypeCandidate(raw?.skinType || raw?.skinTypeHint);
   const confidence = clampConfidence(raw?.confidence);
@@ -1235,6 +1303,7 @@ function normalizeImageInsights(raw, provider) {
   };
 }
 
+// Explains what `mergeConditions` does in the backend API flow.
 function mergeConditions(questionnaireConditions, imageConditions) {
   const merged = new Map();
 
@@ -1275,6 +1344,7 @@ function mergeConditions(questionnaireConditions, imageConditions) {
   return [...merged.values()];
 }
 
+// Explains what `resolveFinalSkinType` does in the backend API flow.
 function resolveFinalSkinType(questionnaireSkinType, imageSkinType, imageConfidence) {
   if (imageSkinType && Number(imageConfidence || 0) >= 0.55) {
     return imageSkinType;
@@ -1282,6 +1352,7 @@ function resolveFinalSkinType(questionnaireSkinType, imageSkinType, imageConfide
   return questionnaireSkinType;
 }
 
+// Explains what `computeAnalysisConfidence` does in the backend API flow.
 function computeAnalysisConfidence(conditions, imageConfidence = null) {
   const conditionAverage =
     conditions.length > 0
@@ -1294,6 +1365,7 @@ function computeAnalysisConfidence(conditions, imageConfidence = null) {
   return Math.max(0.5, Math.min(0.98, (conditionAverage + imageConfidence) / 2));
 }
 
+// Explains what `fetchJsonWithTimeout` does in the backend API flow.
 async function fetchJsonWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1309,6 +1381,7 @@ async function fetchJsonWithTimeout(url, options, timeoutMs) {
   }
 }
 
+// Explains what `analyzeImageViaEndpoint` does in the backend API flow.
 async function analyzeImageViaEndpoint(imageBase64, questionnaireData) {
   if (!IMAGE_ANALYSIS_ENDPOINT) return null;
 
@@ -1332,6 +1405,7 @@ async function analyzeImageViaEndpoint(imageBase64, questionnaireData) {
   return normalizeImageInsights(payload, "endpoint");
 }
 
+// Explains what `analyzeImageViaOpenAI` does in the backend API flow.
 async function analyzeImageViaOpenAI(imageBase64, questionnaireData) {
   if (!OPENAI_API_KEY) return null;
 
@@ -1391,6 +1465,7 @@ async function analyzeImageViaOpenAI(imageBase64, questionnaireData) {
   return normalizeImageInsights(parsed, "openai");
 }
 
+// Explains what `analyzeImageWithAI` does in the backend API flow.
 async function analyzeImageWithAI(imageBase64, questionnaireData) {
   if (!imageBase64) return null;
 
@@ -1422,6 +1497,7 @@ async function analyzeImageWithAI(imageBase64, questionnaireData) {
   return null;
 }
 
+// Explains what `calculateOverallScore` does in the backend API flow.
 function calculateOverallScore(conditions) {
   const severityPenalty = conditions.reduce((total, condition) => {
     if (condition.severity === "severe") return total + 20;
@@ -1432,6 +1508,7 @@ function calculateOverallScore(conditions) {
   return Math.max(35, Math.min(98, score));
 }
 
+// Explains what `ensureConditionId` does in the backend API flow.
 async function ensureConditionId(conditionName) {
   const inserted = await query(
     `INSERT INTO skin_conditions (condition_name)
@@ -1443,6 +1520,7 @@ async function ensureConditionId(conditionName) {
   return inserted.rows[0].condition_id;
 }
 
+// Explains what `normalizeUserStatus` does in the backend API flow.
 function normalizeUserStatus(status) {
   const lowered = String(status || "").toLowerCase();
   if (lowered === "banned") return { is_active: false, is_banned: true };
@@ -1450,6 +1528,7 @@ function normalizeUserStatus(status) {
   return { is_active: true, is_banned: false };
 }
 
+// Explains what `forwardSupportMessageToWeb3Forms` does in the backend API flow.
 async function forwardSupportMessageToWeb3Forms({ name, email, subject, message }) {
   if (!WEB3FORMS_ACCESS_KEY) {
     return { forwarded: false, skipped: true, reason: "WEB3FORMS_ACCESS_KEY is not configured" };
@@ -1519,6 +1598,7 @@ async function forwardSupportMessageToWeb3Forms({ name, email, subject, message 
   }
 }
 
+// Explains what `normalizeSupportStatus` does in the backend API flow.
 function normalizeSupportStatus(status) {
   const lowered = String(status || "").toLowerCase();
   if (lowered === "resolved") return "RESOLVED";
@@ -1526,6 +1606,7 @@ function normalizeSupportStatus(status) {
   return "OPEN";
 }
 
+// Explains what `normalizeSupportMessageType` does in the backend API flow.
 function normalizeSupportMessageType(type) {
   const lowered = String(type || "").trim().toLowerCase();
   if (lowered === "feedback") return "feedback";
@@ -1533,6 +1614,7 @@ function normalizeSupportMessageType(type) {
   return "all";
 }
 
+// Explains what `safeParseJson` does in the backend API flow.
 function safeParseJson(value, fallback = null) {
   if (!value) return fallback;
   try {
@@ -1542,6 +1624,7 @@ function safeParseJson(value, fallback = null) {
   }
 }
 
+// Explains what `formatConditionSummary` does in the backend API flow.
 function formatConditionSummary(conditions = []) {
   if (!Array.isArray(conditions) || conditions.length === 0) return "none detected";
   return conditions
@@ -1550,6 +1633,7 @@ function formatConditionSummary(conditions = []) {
     .join(", ");
 }
 
+// Explains what `formatRecommendationSummary` does in the backend API flow.
 function formatRecommendationSummary(recommendations = []) {
   if (!Array.isArray(recommendations) || recommendations.length === 0) return "No saved recommendations yet.";
   return recommendations
@@ -1720,6 +1804,7 @@ function buildHistoryBlockForGenerate(messages = []) {
     .join("\n");
 }
 
+// Explains what `getLatestAssessmentContextForUser` does in the backend API flow.
 async function getLatestAssessmentContextForUser(userId, client = null) {
   const runQuery = client ? client.query.bind(client) : query;
   const assessmentResult = await runQuery(
@@ -1810,6 +1895,7 @@ async function getLatestAssessmentContextForUser(userId, client = null) {
   };
 }
 
+// Builds the deterministic fallback response used when a local AI provider is unavailable.
 function buildFallbackChatResponse(message, assessmentContext = null) {
   const lowerMessage = String(message || "").toLowerCase();
   const hasAssessment = Boolean(assessmentContext);
@@ -2046,6 +2132,7 @@ async function generateChatResponse(message, assessmentContext = null, history =
   }
 }
 
+// GET /api/health: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/health", (_, res) => {
   res.json({
     ok: true,
@@ -2054,6 +2141,7 @@ app.get("/api/health", (_, res) => {
   });
 });
 
+// GET /api/health/db: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/health/db", async (_, res) => {
   try {
     const db = await checkDbConnection();
@@ -2070,6 +2158,7 @@ app.get("/api/health/db", async (_, res) => {
   }
 });
 
+// POST /api/auth/register: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { name, email, password, gender, dateOfBirth, phoneNumber } = req.body || {};
@@ -2131,6 +2220,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
+// POST /api/auth/login: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -2188,6 +2278,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// POST /api/auth/refresh: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/refresh", async (req, res) => {
   const refreshToken = getRefreshTokenFromRequest(req);
   if (!refreshToken) {
@@ -2304,6 +2395,7 @@ app.post("/api/auth/refresh", async (req, res) => {
   }
 });
 
+// POST /api/auth/logout: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/logout", async (req, res) => {
   try {
     await ensureAuthSessionsTable();
@@ -2325,6 +2417,7 @@ app.post("/api/auth/logout", async (req, res) => {
   return res.json({ message: "Logout successful" });
 });
 
+// POST /api/auth/logout-all: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/logout-all", authenticateToken, async (req, res) => {
   try {
     await ensureAuthSessionsTable();
@@ -2336,6 +2429,7 @@ app.post("/api/auth/logout-all", authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/auth/forgot-password: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/forgot-password", async (req, res) => {
   try {
     const { email } = req.body || {};
@@ -2373,6 +2467,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   }
 });
 
+// POST /api/auth/reset-password: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/auth/reset-password", async (req, res) => {
   const hasResetTokensTable = await tableExists("password_reset_tokens");
   if (!hasResetTokensTable && !(await ensurePasswordResetTokensTable())) {
@@ -2449,6 +2544,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 });
 
+// GET /api/users/me/profile-photo: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/users/me/profile-photo", authenticateToken, async (req, res) => {
   try {
     await ensureUserProfilePhotosTable();
@@ -2472,6 +2568,7 @@ app.get("/api/users/me/profile-photo", authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/users/me/profile-photo: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/users/me/profile-photo", authenticateToken, async (req, res) => {
   try {
     const { imageDataUrl } = req.body || {};
@@ -2504,6 +2601,7 @@ app.post("/api/users/me/profile-photo", authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/contact/submit: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/contact/submit", optionalAuth, async (req, res) => {
   try {
     // Accept contact submissions from guests or logged-in users.
@@ -2543,6 +2641,7 @@ app.post("/api/contact/submit", optionalAuth, async (req, res) => {
   }
 });
 
+// POST /api/assessments/analyze: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2715,6 +2814,7 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/assessments/history: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/assessments/history", authenticateToken, async (req, res) => {
   try {
     // Load only the authenticated user's own assessment history.
@@ -2770,6 +2870,7 @@ app.get("/api/assessments/history", authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/assessments/weekly-progress: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) => {
   try {
     // Build weekly progress strictly from authenticated user's own assessments.
@@ -2837,6 +2938,7 @@ app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) 
   }
 });
 
+// POST /api/chat/message: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/chat/message", authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2920,6 +3022,7 @@ app.post("/api/chat/message", authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/chat/context: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/chat/context", authenticateToken, async (req, res) => {
   try {
     const userId = req.authUser.id;
@@ -2930,6 +3033,7 @@ app.get("/api/chat/context", authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/chat/messages: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/chat/messages", authenticateToken, async (req, res) => {
   try {
     // Return chat history scoped to the authenticated user.
@@ -2983,6 +3087,7 @@ app.get("/api/chat/messages", authenticateToken, async (req, res) => {
 
 app.use("/api/admin", authenticateToken, requireAdmin);
 
+// GET /api/admin/overview: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/admin/overview", async (_req, res) => {
   try {
     const [totalUsers, activeUsers, assessmentsToday, openSupport] = await Promise.all([
@@ -3023,6 +3128,7 @@ app.get("/api/admin/overview", async (_req, res) => {
   }
 });
 
+// GET /api/admin/users: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/admin/users", async (_req, res) => {
   try {
     const result = await query(
@@ -3053,6 +3159,7 @@ app.get("/api/admin/users", async (_req, res) => {
   }
 });
 
+// PUT /api/admin/users/:id: handles this backend API endpoint and returns the response used by the frontend.
 app.put("/api/admin/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -3081,6 +3188,7 @@ app.put("/api/admin/users/:id", async (req, res) => {
   }
 });
 
+// PUT /api/admin/users/:id/ban: handles this backend API endpoint and returns the response used by the frontend.
 app.put("/api/admin/users/:id/ban", async (req, res) => {
   try {
     const { id } = req.params;
@@ -3101,6 +3209,7 @@ app.put("/api/admin/users/:id/ban", async (req, res) => {
   }
 });
 
+// DELETE /api/admin/users/:id: handles this backend API endpoint and returns the response used by the frontend.
 app.delete("/api/admin/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -3114,6 +3223,7 @@ app.delete("/api/admin/users/:id", async (req, res) => {
   }
 });
 
+// GET /api/admin/support-messages: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/admin/support-messages", async (req, res) => {
   try {
     const normalizedStatus = req.query.status ? normalizeSupportStatus(req.query.status) : null;
@@ -3156,6 +3266,7 @@ app.get("/api/admin/support-messages", async (req, res) => {
   }
 });
 
+// PUT /api/admin/support-messages/:id: handles this backend API endpoint and returns the response used by the frontend.
 app.put("/api/admin/support-messages/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -3189,6 +3300,7 @@ app.put("/api/admin/support-messages/:id", async (req, res) => {
   }
 });
 
+// GET /api/admin/analytics: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/admin/analytics", async (_req, res) => {
   try {
     const [hasUsersTable, hasAssessmentsTable, hasDetectedConditionsTable, hasSkinConditionsTable] = await Promise.all([
@@ -3349,11 +3461,13 @@ const ADMIN_REPORT_DEFINITIONS = {
   },
 };
 
+// Explains what `normalizeReportType` does in the backend API flow.
 function normalizeReportType(reportType) {
   const normalized = String(reportType || "").trim().toLowerCase();
   return ADMIN_REPORT_DEFINITIONS[normalized] ? normalized : null;
 }
 
+// Explains what `normalizeReportFormat` does in the backend API flow.
 function normalizeReportFormat(format) {
   const normalized = String(format || "json").trim().toLowerCase();
   if (normalized === "json" || normalized === "csv" || normalized === "excel" || normalized === "pdf") {
@@ -3362,6 +3476,7 @@ function normalizeReportFormat(format) {
   return null;
 }
 
+// Explains what `parseReportDateRange` does in the backend API flow.
 function parseReportDateRange(dateFrom, dateTo) {
   const normalizedFrom = dateFrom ? String(dateFrom).trim() : null;
   const normalizedTo = dateTo ? String(dateTo).trim() : null;
@@ -3383,6 +3498,7 @@ function parseReportDateRange(dateFrom, dateTo) {
   };
 }
 
+// Explains what `normalizeBoolean` does in the backend API flow.
 function normalizeBoolean(value, fallback = true) {
   if (typeof value === "boolean") return value;
   const normalized = String(value || "").trim().toLowerCase();
@@ -3391,6 +3507,7 @@ function normalizeBoolean(value, fallback = true) {
   return fallback;
 }
 
+// Explains what `parseSkinTypeFromAssessmentNotes` does in the backend API flow.
 function parseSkinTypeFromAssessmentNotes(notes) {
   if (!notes) return "Unknown";
   try {
@@ -3401,6 +3518,7 @@ function parseSkinTypeFromAssessmentNotes(notes) {
   }
 }
 
+// Explains what `formatDateValue` does in the backend API flow.
 function formatDateValue(value) {
   if (!value) return "";
   const parsed = new Date(value);
@@ -3408,6 +3526,7 @@ function formatDateValue(value) {
   return parsed.toISOString();
 }
 
+// Explains what `escapeCsvValue` does in the backend API flow.
 function escapeCsvValue(value) {
   if (value === null || value === undefined) return "";
   const text = typeof value === "object" ? JSON.stringify(value) : String(value);
@@ -3415,6 +3534,7 @@ function escapeCsvValue(value) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
+// Explains what `rowsToCsv` does in the backend API flow.
 function rowsToCsv(rows) {
   if (!rows.length) {
     return "message\nNo records found\n";
@@ -3428,6 +3548,7 @@ function rowsToCsv(rows) {
   return `${lines.join("\n")}\n`;
 }
 
+// Explains what `escapePdfText` does in the backend API flow.
 function escapePdfText(value) {
   return String(value || "")
     .replace(/\\/g, "\\\\")
@@ -3435,6 +3556,7 @@ function escapePdfText(value) {
     .replace(/\)/g, "\\)");
 }
 
+// Explains what `buildSimplePdfBuffer` does in the backend API flow.
 function buildSimplePdfBuffer(lines) {
   const printableLines = [...(lines || [])];
   if (printableLines.length === 0) printableLines.push("No records found.");
@@ -3478,6 +3600,7 @@ function buildSimplePdfBuffer(lines) {
   return Buffer.from(pdf, "utf8");
 }
 
+// Explains what `toReportFileName` does in the backend API flow.
 function toReportFileName(reportType, format) {
   const safeType = String(reportType || "report").replace(/[^a-z0-9-]+/gi, "_");
   const dateStamp = new Date().toISOString().slice(0, 10);
@@ -3486,12 +3609,14 @@ function toReportFileName(reportType, format) {
   return `${safeType}_${dateStamp}.${extension}`;
 }
 
+// Explains what `toSizeLabel` does in the backend API flow.
 function toSizeLabel(bytes) {
   const safeBytes = Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
   if (safeBytes === 0) return "1 KB";
   return `${Math.max(1, Math.ceil(safeBytes / 1024))} KB`;
 }
 
+// Explains what `buildAdminReportRows` does in the backend API flow.
 async function buildAdminReportRows(reportType, dateFrom, dateTo) {
   const filterParams = [dateFrom, dateTo];
 
@@ -3608,6 +3733,7 @@ async function buildAdminReportRows(reportType, dateFrom, dateTo) {
   }));
 }
 
+// Explains what `buildReportExportFile` does in the backend API flow.
 function buildReportExportFile(reportType, format, rows, dateFrom, dateTo) {
   const definition = ADMIN_REPORT_DEFINITIONS[reportType] || { name: reportType };
   const generatedAt = new Date().toISOString();
@@ -3661,6 +3787,7 @@ function buildReportExportFile(reportType, format, rows, dateFrom, dateTo) {
   };
 }
 
+// GET /api/admin/reports/list: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/admin/reports/list", async (_req, res) => {
   try {
     const [usersCount, assessmentsCount, conditionsCount, messagesCount] = await Promise.all([
@@ -3707,6 +3834,7 @@ app.get("/api/admin/reports/list", async (_req, res) => {
   }
 });
 
+// GET /api/admin/reports/recent: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/admin/reports/recent", async (_req, res) => {
   try {
     const result = await query(
@@ -3738,6 +3866,7 @@ app.get("/api/admin/reports/recent", async (_req, res) => {
   }
 });
 
+// POST /api/admin/reports/generate: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/admin/reports/generate", async (req, res) => {
   try {
     // Attribute generated reports to the authenticated admin.
@@ -3799,6 +3928,7 @@ app.post("/api/admin/reports/generate", async (req, res) => {
   }
 });
 
+// POST /api/admin/reports/export: handles this backend API endpoint and returns the response used by the frontend.
 app.post("/api/admin/reports/export", async (req, res) => {
   try {
     const { reportType, dateFrom, dateTo, format = "csv", audit = true } = req.body || {};
@@ -3852,6 +3982,7 @@ app.post("/api/admin/reports/export", async (req, res) => {
   }
 });
 
+// Central Express error handler that converts parsing and server errors into JSON responses.
 app.use((error, _req, res, _next) => {
   if (error?.type === "entity.too.large") {
     return res.status(413).json({
@@ -3884,6 +4015,16 @@ const server = app.listen(PORT, async () => {
   }
 });
 
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Backend port ${PORT} is already in use. Set PORT to a free port or stop the other process.`);
+  } else {
+    console.error("Backend server failed:", error.message);
+  }
+  process.exit(1);
+});
+
+// Explains what `shutdown` does in the backend API flow.
 async function shutdown() {
   console.log("Shutting down backend...");
   server.close(async () => {

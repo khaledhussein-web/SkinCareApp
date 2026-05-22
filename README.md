@@ -1,4 +1,4 @@
-# Personalized Skincare Web App
+# Glorielle
 
 This project now has:
 - Frontend (Vite + React) in the project root

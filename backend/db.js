@@ -1,14 +1,16 @@
-const path = require("path");
+﻿const path = require("path");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
 
 dotenv.config({ path: path.resolve(__dirname, ".env") });
 
+// Explains what `toNumber` does in the backend API flow.
 function toNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+// Explains what `buildPoolConfig` does in the backend API flow.
 function buildPoolConfig() {
   const ssl = process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : undefined;
 
@@ -37,10 +39,12 @@ function buildPoolConfig() {
 
 const pool = new Pool(buildPoolConfig());
 
+// Explains what `query` does in the backend API flow.
 async function query(text, params) {
   return pool.query(text, params);
 }
 
+// Explains what `checkDbConnection` does in the backend API flow.
 async function checkDbConnection() {
   const result = await query("SELECT NOW() AS connected_at, current_database() AS database_name");
   return result.rows[0];

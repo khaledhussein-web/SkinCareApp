@@ -1,4 +1,4 @@
-# Skincare Web Application - Complete Project Summary
+# Glorielle - Complete Project Summary
 
 ## 1. PROJECT OVERVIEW
 

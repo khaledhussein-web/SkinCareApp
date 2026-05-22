@@ -107,7 +107,7 @@ export const HomeScreen: React.FC = () => {
             className="text-center mb-16"
           >
             <h2 className="text-3xl sm:text-4xl mb-4 text-slate-800">
-              Why Choose SkinCare AI?
+              Why Choose Glorielle?
             </h2>
             <p className="text-lg text-slate-600 max-w-2xl mx-auto">
               Advanced technology meets personalized care for your unique skin needs
@@ -219,7 +219,7 @@ export const HomeScreen: React.FC = () => {
       <footer className="py-8 px-4 bg-white/50 border-t">
         <div className="max-w-7xl mx-auto text-center text-slate-600">
           <p className="text-sm">
-            &copy; 2026 SkinCare AI. For educational purposes only. Consult a dermatologist for medical advice.
+            &copy; 2026 Glorielle. For educational purposes only. Consult a dermatologist for medical advice.
           </p>
         </div>
       </footer>

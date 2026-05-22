@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 import sys
@@ -12,8 +12,11 @@ MASTER_DATASET_PATH = BASE_DIR / "data" / "merged" / "master_questionnaire_predi
 MODEL_ARTIFACT_PATH = BASE_DIR / "models" / "skincare_models.joblib"
 
 
+# Runs the FastAPI model training script from the command line.
 def main() -> None:
+    # Step 1: train the models from the merged master questionnaire dataset.
     artifact = train_and_save_models(MASTER_DATASET_PATH, MODEL_ARTIFACT_PATH)
+    # Step 2: print the saved artifact path and metrics so the training result can be checked.
     print("Training completed.")
     print(f"Model artifact: {MODEL_ARTIFACT_PATH}")
     print("Metrics:")

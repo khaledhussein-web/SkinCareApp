@@ -43,7 +43,7 @@ export const Navbar: React.FC = () => {
             <div className="p-2 bg-gradient-to-br from-pink-400 to-purple-500 rounded-lg group-hover:scale-110 transition-transform">
               <Sparkles className="w-5 h-5 text-white" />
             </div>
-            <span className="text-xl text-slate-800 hidden sm:block">SkinCare AI</span>
+            <span className="text-xl text-slate-800 hidden sm:block">Glorielle</span>
           </Link>
 
           {/* Desktop Navigation */}
