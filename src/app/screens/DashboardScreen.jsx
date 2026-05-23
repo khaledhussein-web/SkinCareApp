@@ -86,7 +86,7 @@ export const DashboardScreen: React.FC = () => {
         {/* Quick Actions */}
         <div className="mb-8">
           <h3 className="text-xl sm:text-2xl mb-4 text-slate-800">Quick Actions</h3>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
             {[
               {
                 icon: FileText,
@@ -109,6 +109,13 @@ export const DashboardScreen: React.FC = () => {
                 action: () => navigate('/chat'),
                 color: 'from-purple-400 to-indigo-400',
                 disabled: !hasCompletedAssessment,
+              },
+              {
+                icon: Sparkles,
+                title: 'Photo Comparison',
+                description: 'Track progress between two photos',
+                action: () => navigate('/progress-tracking'),
+                color: 'from-emerald-400 to-cyan-400',
               },
             ].map((action, index) => (
               <motion.div
@@ -146,6 +153,26 @@ export const DashboardScreen: React.FC = () => {
             ))}
           </div>
         </div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="mb-8"
+        >
+          <button
+            type="button"
+            onClick={() => navigate('/progress-tracking')}
+            className="w-full rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-cyan-50 p-5 text-left hover:shadow-md transition"
+          >
+            <p className="text-emerald-900">
+              <strong>Track progress with photo comparison {"->"}</strong>
+            </p>
+            <p className="text-sm text-emerald-700 mt-1">
+              Compare any two saved assessments and review AI-detected condition changes.
+            </p>
+          </button>
+        </motion.div>
 
         {/* Results Summary (if completed) */}
         {hasCompletedAssessment && analysisResult && (

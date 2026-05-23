@@ -22,7 +22,8 @@ export const Navbar: React.FC = () => {
   if (isAuthenticated && !isAdmin) {
     navItems.splice(2, 0, 
       { path: '/profile', label: 'Profile' },
-      { path: '/history', label: 'History' }
+      { path: '/history', label: 'History' },
+      { path: '/progress-tracking', label: 'Progress Tracking' }
     );
   }
 

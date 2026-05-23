@@ -20,6 +20,7 @@ import { UploadScreen } from '@/app/screens/UploadScreen';
 import { AnalyzingScreen } from '@/app/screens/AnalyzingScreen';
 import { ResultsScreen } from '@/app/screens/ResultsScreen';
 import { ChatScreen } from '@/app/screens/ChatScreen';
+import ProgressTrackingScreen from '@/app/screens/ProgressTrackingScreen';
 import { ProfileScreen } from '@/app/screens/user/ProfileScreen';
 import { HistoryScreen } from '@/app/screens/user/HistoryScreen';
 
@@ -101,6 +102,14 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <HistoryScreen />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/progress-tracking"
+                element={
+                  <ProtectedRoute>
+                    <ProgressTrackingScreen />
                   </ProtectedRoute>
                 }
               />

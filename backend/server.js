@@ -2132,6 +2132,274 @@ async function generateChatResponse(message, assessmentContext = null, history =
   }
 }
 
+// ============================================================================
+// PROGRESS TRACKING: Helper functions for photo comparison and AI analysis
+// ============================================================================
+
+// Explains what `optimizeImageForAI` does in the backend API flow.
+async function optimizeImageForAI(imageBase64, maxDimension = 1024) {
+  try {
+    if (!imageBase64) return null;
+
+    const dataUrl = ensureImageDataUrl(imageBase64);
+    if (!dataUrl) return null;
+
+    const matched = /^data:([^;]+);base64,(.+)$/i.exec(dataUrl);
+    if (!matched) return imageBase64;
+
+    const mimeType = matched[1];
+    const base64Payload = matched[2];
+
+    // For now, return as-is. In production, use sharp library for actual resizing:
+    // const buffer = Buffer.from(base64Payload, 'base64');
+    // const optimized = await sharp(buffer).resize(maxDimension, maxDimension, {
+    //   fit: 'inside',
+    //   withoutEnlargement: true,
+    // }).toBuffer();
+    // return `data:${mimeType};base64,${optimized.toString('base64')}`;
+
+    return dataUrl;
+  } catch (error) {
+    console.warn(`[image-optimization] ${error.message}`);
+    return imageBase64;
+  }
+}
+
+async function callFastAPIPredictSingle(imageBase64, questionnaireData = {}) {
+  const fastApiUrl = (process.env.FASTAPI_URL || "http://localhost:8000").replace(/\/$/, "");
+  const payload = {
+    imageBase64: imageBase64 || null,
+    questionnaireData: questionnaireData || {},
+  };
+
+  const { response, payload: result } = await fetchJsonWithTimeout(
+    `${fastApiUrl}/predict`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    15000,
+  );
+
+  if (!response.ok) {
+    const message = result?.detail || result?.error || result?.message || `FastAPI /predict failed with status ${response.status}`;
+    const fastApiError = new Error(message);
+    fastApiError.status = response.status;
+    throw fastApiError;
+  }
+
+  return result;
+}
+
+// Explains what `callFastAPIPrediction` does in the backend API flow.
+async function callFastAPIPrediction(imageBase64_1, imageBase64_2, questionnaire1, questionnaire2) {
+  const [prediction1, prediction2] = await Promise.all([
+    callFastAPIPredictSingle(imageBase64_1, questionnaire1),
+    callFastAPIPredictSingle(imageBase64_2, questionnaire2),
+  ]);
+
+  return {
+    prediction1,
+    prediction2,
+    conditions1: normalizeImageConditions(prediction1?.conditions || [], "fastapi"),
+    conditions2: normalizeImageConditions(prediction2?.conditions || [], "fastapi"),
+  };
+}
+
+function normalizePredictionScores(prediction) {
+  const raw = prediction?.scores;
+  if (!raw || typeof raw !== "object") return {};
+  const normalized = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      normalized[key] = numeric;
+    }
+  }
+  return normalized;
+}
+
+// Explains what `calculateProgressMetrics` does in the backend API flow.
+function calculateProgressMetrics(score1, score2, conditions1, conditions2) {
+  const safeScore1 = Number(score1 || 0);
+  const safeScore2 = Number(score2 || 0);
+  const scoreDelta = safeScore2 - safeScore1;
+  const percentChange = safeScore1 !== 0 ? Number(((scoreDelta / safeScore1) * 100).toFixed(1)) : null;
+
+  const conditionMap1 = new Map(conditions1.map((condition) => [String(condition.name || "").toLowerCase(), condition]));
+  const conditionMap2 = new Map(conditions2.map((condition) => [String(condition.name || "").toLowerCase(), condition]));
+
+  const conditionChanges = [];
+  const allConditionKeys = new Set([...conditionMap1.keys(), ...conditionMap2.keys()]);
+  for (const conditionKey of allConditionKeys) {
+    const before = conditionMap1.get(conditionKey);
+    const after = conditionMap2.get(conditionKey);
+
+    if (!before && after) {
+      conditionChanges.push({
+        name: after.name,
+        beforeSeverity: null,
+        afterSeverity: after.severity,
+        trend: "new",
+        confidence: after.confidence ?? null,
+      });
+      continue;
+    }
+
+    if (before && !after) {
+      conditionChanges.push({
+        name: before.name,
+        beforeSeverity: before.severity,
+        afterSeverity: null,
+        trend: "resolved",
+        confidence: before.confidence ?? null,
+      });
+      continue;
+    }
+
+    if (before && after) {
+      const beforeWeight = severityWeight(before.severity);
+      const afterWeight = severityWeight(after.severity);
+      let trend = "no_change";
+      if (afterWeight < beforeWeight) trend = "improved";
+      if (afterWeight > beforeWeight) trend = "worsened";
+
+      conditionChanges.push({
+        name: before.name,
+        beforeSeverity: before.severity,
+        afterSeverity: after.severity,
+        trend,
+        confidence: Math.max(Number(before.confidence || 0), Number(after.confidence || 0)),
+      });
+    }
+  }
+
+  const conditionsImproved = conditionChanges.filter((condition) => condition.trend === "improved");
+  const conditionsWorsened = conditionChanges.filter((condition) => condition.trend === "worsened");
+  const newConditions = conditionChanges.filter((condition) => condition.trend === "new");
+  const resolvedConditions = conditionChanges.filter((condition) => condition.trend === "resolved");
+  const unchangedConditions = conditionChanges.filter((condition) => condition.trend === "no_change");
+
+  const positiveCount = conditionsImproved.length + resolvedConditions.length;
+  const negativeCount = conditionsWorsened.length + newConditions.length;
+  const totalTracked = Math.max(allConditionKeys.size, 1);
+  const overallProgressPercent = Math.round(((positiveCount - negativeCount) / totalTracked) * 100);
+
+  return {
+    scoreDelta,
+    percentChange,
+    conditionsImproved,
+    conditionsWorsened,
+    newConditions,
+    resolvedConditions,
+    unchangedConditions,
+    overallProgressPercent,
+    conditionChanges,
+  };
+}
+
+// Explains what `generateProgressReport` does in the backend API flow.
+async function generateProgressReport(assessment1, assessment2, metrics) {
+  const date1 = new Date(assessment1.assessment_date);
+  const date2 = new Date(assessment2.assessment_date);
+  const daysDiff = Math.round((date2 - date1) / (1000 * 60 * 60 * 24));
+
+  const reportLines = [
+    "# Skin Progress Report",
+    `Comparison Period: ${date1.toLocaleDateString()} to ${date2.toLocaleDateString()} (${daysDiff} days)`,
+    "",
+    "## Overall Progress",
+    `Score Change: ${metrics.scoreDelta > 0 ? "+" : ""}${metrics.scoreDelta} points (${metrics.percentChange === null ? "N/A" : `${metrics.percentChange}%`})`,
+    `Overall Progress: ${metrics.overallProgressPercent}%`,
+    "",
+    "## Condition Analysis",
+    `Improved: ${metrics.conditionsImproved.length}`,
+    `Worsened: ${metrics.conditionsWorsened.length}`,
+    `New: ${metrics.newConditions.length}`,
+    `Resolved: ${metrics.resolvedConditions.length}`,
+    "",
+    "## Detailed Changes",
+  ];
+
+  if (metrics.conditionChanges.length > 0) {
+    for (const change of metrics.conditionChanges) {
+      const trendPrefix = change.trend === "improved"
+        ? "[Improved]"
+        : change.trend === "resolved"
+          ? "[Resolved]"
+          : change.trend === "worsened"
+            ? "[Worsened]"
+            : change.trend === "new"
+              ? "[New]"
+              : "[No Change]";
+      const details =
+        change.beforeSeverity && change.afterSeverity
+          ? `${change.beforeSeverity} -> ${change.afterSeverity}`
+          : change.beforeSeverity
+            ? `${change.beforeSeverity} -> resolved`
+            : `newly detected (${change.afterSeverity})`;
+      reportLines.push(`- ${trendPrefix} ${change.name}: ${details}`);
+    }
+  } else {
+    reportLines.push("- No significant condition changes detected");
+  }
+
+  reportLines.push("");
+  reportLines.push("## Recommendations");
+  reportLines.push("Continue your current skincare routine and monitor progress in the coming weeks.");
+
+  return reportLines.join("\n");
+}
+
+// Explains what `fetchAssessmentWithImage` does in the backend API flow.
+async function fetchAssessmentWithImage(assessmentId, userId, client = null) {
+  const runQuery = client ? client.query.bind(client) : query;
+
+  const assessmentResult = await runQuery(
+    `SELECT assessment_id, assessment_date, overall_score, notes
+     FROM skin_assessments
+     WHERE assessment_id = $1 AND user_id = $2`,
+    [assessmentId, userId],
+  );
+
+  if (assessmentResult.rowCount === 0) {
+    return null;
+  }
+
+  const assessment = assessmentResult.rows[0];
+
+  // Fetch image
+  const imageResult = await runQuery(
+    `SELECT image_url, mime_type
+     FROM skin_images
+     WHERE assessment_id = $1 AND user_id = $2
+     LIMIT 1`,
+    [assessmentId, userId],
+  );
+
+  // Fetch conditions
+  const conditionsResult = await runQuery(
+    `SELECT sc.condition_name, dc.severity_level, dc.confidence_score
+     FROM ai_analyses aa
+     JOIN ai_detected_conditions dc ON dc.analysis_id = aa.analysis_id
+     JOIN skin_conditions sc ON sc.condition_id = dc.condition_id
+     WHERE aa.assessment_id = $1
+     ORDER BY dc.confidence_score DESC`,
+    [assessmentId],
+  );
+
+  return {
+    assessment,
+    imageUrl: imageResult.rows[0]?.image_url || null,
+    conditions: conditionsResult.rows.map((row) => ({
+      name: row.condition_name,
+      severity: String(row.severity_level || "mild").toLowerCase(),
+      confidence: Number(row.confidence_score || 0.5),
+    })),
+  };
+}
+
 // GET /api/health: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/health", (_, res) => {
   res.json({
@@ -2870,6 +3138,43 @@ app.get("/api/assessments/history", authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/assessments/with-images: returns only assessments that contain stored photos.
+app.get("/api/assessments/with-images", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.authUser.id;
+    const result = await query(
+      `SELECT sa.assessment_id,
+              sa.assessment_date,
+              sa.overall_score,
+              sa.notes,
+              si.image_url
+       FROM skin_assessments sa
+       JOIN LATERAL (
+         SELECT image_url
+         FROM skin_images
+         WHERE assessment_id = sa.assessment_id AND user_id = sa.user_id
+         LIMIT 1
+       ) si ON TRUE
+       WHERE sa.user_id = $1
+       ORDER BY sa.assessment_date DESC`,
+      [userId],
+    );
+
+    const assessments = result.rows.map((row) => ({
+      id: row.assessment_id,
+      date: row.assessment_date,
+      score: Number(row.overall_score || 0),
+      skinType: parseSkinTypeFromAssessmentNotes(row.notes),
+      imageUrl: row.image_url || null,
+      hasImage: Boolean(row.image_url),
+    }));
+
+    return res.json({ assessments });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch assessments with images", details: error.message });
+  }
+});
+
 // GET /api/assessments/weekly-progress: handles this backend API endpoint and returns the response used by the frontend.
 app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) => {
   try {
@@ -2935,6 +3240,149 @@ app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) 
     return res.json(weeklyProgress);
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch weekly progress", details: error.message });
+  }
+});
+
+// POST /api/assessments/compare-progress: AI-powered photo comparison for progress tracking.
+app.post("/api/assessments/compare-progress", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.authUser.id;
+    const {
+      assessmentId1 = null,
+      assessmentId2 = null,
+      // Backward compatibility for existing clients.
+      date1 = null,
+      date2 = null,
+    } = req.body || {};
+
+    const resolvedAssessmentId1 = assessmentId1 || date1;
+    const resolvedAssessmentId2 = assessmentId2 || date2;
+
+    if (!resolvedAssessmentId1 || !resolvedAssessmentId2) {
+      return res.status(400).json({ error: "assessmentId1 and assessmentId2 are required" });
+    }
+
+    if (String(resolvedAssessmentId1) === String(resolvedAssessmentId2)) {
+      return res.status(400).json({ error: "Please select two different assessments for comparison" });
+    }
+
+    // Fetch both assessments
+    const assessment1Full = await fetchAssessmentWithImage(resolvedAssessmentId1, userId);
+    const assessment2Full = await fetchAssessmentWithImage(resolvedAssessmentId2, userId);
+
+    if (!assessment1Full || !assessment2Full) {
+      return res.status(404).json({ error: "One or both assessments not found" });
+    }
+
+    if (!assessment1Full.imageUrl || !assessment2Full.imageUrl) {
+      return res.status(400).json({ error: "Both assessments must have images for comparison" });
+    }
+
+    const assessment1 = assessment1Full.assessment;
+    const assessment2 = assessment2Full.assessment;
+
+    const [beforeAssessmentFull, afterAssessmentFull] = new Date(assessment1.assessment_date) <= new Date(assessment2.assessment_date)
+      ? [assessment1Full, assessment2Full]
+      : [assessment2Full, assessment1Full];
+    const beforeAssessment = beforeAssessmentFull.assessment;
+    const afterAssessment = afterAssessmentFull.assessment;
+
+    // Optimize images
+    const optimizedImage1 = await optimizeImageForAI(beforeAssessmentFull.imageUrl);
+    const optimizedImage2 = await optimizeImageForAI(afterAssessmentFull.imageUrl);
+
+    // Get questionnaire data from assessments
+    const notes1 = safeParseJson(beforeAssessment.notes, {});
+    const notes2 = safeParseJson(afterAssessment.notes, {});
+    const questionnaire1 = notes1?.questionnaireData || {};
+    const questionnaire2 = notes2?.questionnaireData || {};
+
+    // Call FastAPI for predictions
+    let fastApiResult;
+    try {
+      fastApiResult = await callFastAPIPrediction(
+        optimizedImage1,
+        optimizedImage2,
+        questionnaire1,
+        questionnaire2,
+      );
+    } catch (fastApiError) {
+      console.warn(`[fastapi-prediction] ${fastApiError.message}`);
+      return res.status(502).json({
+        error: "FastAPI prediction failed",
+        details: fastApiError.message,
+      });
+    }
+
+    // Calculate metrics
+    const metrics = calculateProgressMetrics(
+      beforeAssessment.overall_score,
+      afterAssessment.overall_score,
+      fastApiResult.conditions1,
+      fastApiResult.conditions2,
+    );
+
+    // Generate progress report
+    const report = await generateProgressReport(beforeAssessment, afterAssessment, metrics);
+
+    // Generate Ollama narrative analysis (optional, fallback to report if unavailable)
+    let aiNarrativeSummary = null;
+    try {
+      const narrativePrompt = `Based on these skin assessments:
+- Date 1: ${beforeAssessment.assessment_date}, Score: ${beforeAssessment.overall_score}
+- Date 2: ${afterAssessment.assessment_date}, Score: ${afterAssessment.overall_score}
+- Score Change: ${metrics.scoreDelta > 0 ? "+" : ""}${metrics.scoreDelta}
+- Conditions improved: ${metrics.conditionsImproved.length + metrics.resolvedConditions.length}
+- Conditions worsened/new: ${metrics.conditionsWorsened.length + metrics.newConditions.length}
+
+Write a brief 2-3 sentence narrative summary of the user's skin progress.`;
+
+      aiNarrativeSummary = await generateOllamaChatResponse(narrativePrompt, null, []);
+    } catch (error) {
+      console.warn("[ai-narrative] Failed to generate Ollama narrative:", error.message);
+    }
+
+    return res.status(201).json({
+      message: "Progress comparison completed",
+      comparison: {
+        date1: beforeAssessment.assessment_date,
+        date2: afterAssessment.assessment_date,
+        image1: beforeAssessmentFull.imageUrl,
+        image2: afterAssessmentFull.imageUrl,
+        score1: Number(beforeAssessment.overall_score || 0),
+        score2: Number(afterAssessment.overall_score || 0),
+        analysis1: {
+          summary: fastApiResult.prediction1?.summary || null,
+          confidence: fastApiResult.prediction1?.confidence ?? null,
+          skinType: fastApiResult.prediction1?.skinType || null,
+          scores: normalizePredictionScores(fastApiResult.prediction1),
+          conditions: fastApiResult.conditions1,
+        },
+        analysis2: {
+          summary: fastApiResult.prediction2?.summary || null,
+          confidence: fastApiResult.prediction2?.confidence ?? null,
+          skinType: fastApiResult.prediction2?.skinType || null,
+          scores: normalizePredictionScores(fastApiResult.prediction2),
+          conditions: fastApiResult.conditions2,
+        },
+      },
+      metrics: {
+        scoreDelta: metrics.scoreDelta,
+        percentChange: metrics.percentChange,
+        conditionsImproved: metrics.conditionsImproved,
+        conditionsWorsened: metrics.conditionsWorsened,
+        newConditions: metrics.newConditions,
+        resolvedConditions: metrics.resolvedConditions,
+        unchangedConditions: metrics.unchangedConditions,
+        overallProgressPercent: metrics.overallProgressPercent,
+      },
+      analysis: {
+        report,
+        aiSummary: aiNarrativeSummary || "Progress tracking report generated. Review the detailed conditions above.",
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to compare progress", details: error.message });
   }
 });
 

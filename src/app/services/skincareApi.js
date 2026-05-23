@@ -199,3 +199,25 @@ export async function exportReport(payload) {
   const blob = await response.blob();
   return { blob, fileName };
 }
+
+// ============================================================================
+// PROGRESS TRACKING: Compare two photo dates with AI analysis
+// ============================================================================
+
+export async function compareProgressPhotos(assessmentId1, assessmentId2) {
+  // Compare two assessments with AI-powered analysis.
+  // Input: two assessment IDs
+  // Output: comparison metrics, progress analysis, and AI narrative
+  return apiFetch("/api/assessments/compare-progress", {
+    method: "POST",
+    body: {
+      assessmentId1,
+      assessmentId2,
+    },
+  });
+}
+
+export async function fetchAssessmentsWithImages() {
+  // Get list of assessments that have images (for date picker).
+  return apiFetch("/api/assessments/with-images");
+}
