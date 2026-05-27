@@ -40,9 +40,11 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = async (email, password) => {
+    const safeEmail = String(email || "").trim();
+    const safePassword = String(password ?? "");
     const data = await apiFetch("/api/auth/login", {
       method: "POST",
-      body: { email, password },
+      body: { email: safeEmail, password: safePassword },
     });
 
     setUser(data.user);

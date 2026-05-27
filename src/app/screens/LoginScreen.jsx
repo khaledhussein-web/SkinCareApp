@@ -10,6 +10,7 @@ import { useAuth } from '@/app/context/AuthContext';
 import { Sparkles, Mail, Lock, Loader2, Eye, EyeOff } from 'lucide-react';
 import { toast } from 'sonner';
 
+
 export const LoginScreen: React.FC = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
@@ -17,18 +18,34 @@ export const LoginScreen: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-
+  
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading) return;
+
+    const form = e.currentTarget as HTMLFormElement;
+    const formData = new FormData(form);
+    const submittedEmail = String(formData.get('email') || email).trim();
+    const submittedPassword = String(formData.get('password') || password);
+
+    if (!submittedEmail || !submittedPassword) {
+      toast.error('Email and password are required');
+      return;
+    }
+
+    // Keep state synchronized with values submitted (helps with browser autofill timing).
+    setEmail(submittedEmail);
+    setPassword(submittedPassword);
     setIsLoading(true);
 
     try {
-      const loggedInUser = await login(email, password);
+      const loggedInUser = await login(submittedEmail, submittedPassword);
       const displayName = String(loggedInUser?.name || 'User').trim();
       toast.success(`Welcome "${displayName}"`);
       navigate(loggedInUser?.role === 'admin' ? '/admin' : '/dashboard');
     } catch (error) {
-      toast.error('Invalid email or password');
+      const message = error instanceof Error ? error.message : 'Login failed';
+      toast.error(message || 'Login failed');
     } finally {
       setIsLoading(false);
     }
@@ -63,9 +80,11 @@ export const LoginScreen: React.FC = () => {
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                   <Input
                     id="email"
+                    name="email"
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    autoComplete="username"
                     required
                     placeholder="you@example.com"
                     className="pl-10"
@@ -81,9 +100,11 @@ export const LoginScreen: React.FC = () => {
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                   <Input
                     id="password"
+                    name="password"
                     type={showPassword ? 'text' : 'password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="current-password"
                     required
                     placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
                     className="pl-10 pr-10"
@@ -149,62 +170,4 @@ export const LoginScreen: React.FC = () => {
     </div>
   );
 };
-
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { motion } from 'motion/react';
-import { RadioGroup, RadioGroupItem } from '@/app/components/ui/radio-group';
-import { Label } from '@/app/components/ui/label';
-import { Button } from '@/app/components/ui/button';
-import { Card, CardContent } from '@/app/components/ui/card';
-import { ProgressBar } from '@/app/components/ProgressBar';
-import { useSkinCare } from '@/app/context/SkinCareContext';
-import { Droplets, Sun, AlertCircle, Sparkles } from 'lucide-react';
-
-const questions = [
-  {
-    id: 'afterCleansing',
-    question: 'How does your skin feel 20 minutes after cleansing?',
-    icon: Droplets,
-    options: [
-      { value: 'tight', label: 'Tight and uncomfortable' },
-      { value: 'comfortable', label: 'Comfortable and balanced' },
-      { value: 'slightly-oily', label: 'Slightly oily in T-zone' },
-      { value: 'very-oily', label: 'Very oily all over' },
-    ],
-  },
-  {
-    id: 'middayFeeling',
-    question: 'How does your skin feel by midday?',
-    icon: Sun,
-    options: [
-      { value: 'flaky', label: 'Dry and flaky' },
-      { value: 'normal', label: 'Still comfortable' },
-      { value: 'shiny-tzone', label: 'Shiny in T-zone only' },
-      { value: 'shiny-all', label: 'Shiny everywhere' },
-    ],
-  },
-  {
-    id: 'productReaction',
-    question: 'How does your skin typically react to new products?',
-    icon: AlertCircle,
-    options: [
-      { value: 'sensitive', label: 'Often gets irritated or red' },
-      { value: 'rarely', label: 'Rarely has any reaction' },
-      { value: 'breakouts', label: 'Sometimes causes breakouts' },
-      { value: 'immediate', label: 'Immediate stinging or burning' },
-    ],
-  },
-  {
-    id: 'shineLevel',
-    question: 'How does your skin look in photos with flash?',
-    icon: Sparkles,
-    options: [
-      { value: 'matte', label: 'Matte and dull' },
-      { value: 'natural', label: 'Natural and even' },
-      { value: 'slight-shine', label: 'Some shine on forehead and nose' },
-      { value: 'very-shiny', label: 'Very shiny and reflective' },
-    ],
-  },
-];
 
