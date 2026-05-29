@@ -26,7 +26,8 @@ const REFRESH_COOKIE_PATH = process.env.REFRESH_COOKIE_PATH || "/api/auth";
 const USE_SECURE_COOKIES =
   String(process.env.NODE_ENV || "").toLowerCase() === "production" || FRONTEND_ORIGIN.startsWith("https://");
 const IMAGE_ANALYSIS_PROVIDER = String(process.env.IMAGE_ANALYSIS_PROVIDER || "auto").toLowerCase();
-const IMAGE_ANALYSIS_ENDPOINT = process.env.IMAGE_ANALYSIS_ENDPOINT || "";
+const FASTAPI_URL = (process.env.FASTAPI_URL || "http://localhost:8000").replace(/\/$/, "");
+const IMAGE_ANALYSIS_ENDPOINT = process.env.IMAGE_ANALYSIS_ENDPOINT || `${FASTAPI_URL}/predict`;
 const IMAGE_ANALYSIS_TIMEOUT_MS = Number(process.env.IMAGE_ANALYSIS_TIMEOUT_MS) || 15_000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
@@ -1288,12 +1289,33 @@ function normalizeImageConditions(conditions, sourceTag) {
     .filter(Boolean);
 }
 
+function normalizeRecommendationMatch(recommendationMatch) {
+  if (!recommendationMatch || typeof recommendationMatch !== "object") return null;
+
+  const normalized = {
+    recommended_cleanser:
+      recommendationMatch.recommended_cleanser || recommendationMatch.recommendedCleanser || null,
+    recommended_moisturizer:
+      recommendationMatch.recommended_moisturizer || recommendationMatch.recommendedMoisturizer || null,
+    recommended_serum: recommendationMatch.recommended_serum || recommendationMatch.recommendedSerum || null,
+    recommended_spf: recommendationMatch.recommended_spf || recommendationMatch.recommendedSpf || null,
+    recommended_treatment:
+      recommendationMatch.recommended_treatment || recommendationMatch.recommendedTreatment || null,
+  };
+
+  const hasAtLeastOne = Object.values(normalized).some((value) => String(value || "").trim().length > 0);
+  return hasAtLeastOne ? normalized : null;
+}
+
 // Explains what `normalizeImageInsights` does in the backend API flow.
 function normalizeImageInsights(raw, provider) {
-  const skinType = normalizeSkinTypeCandidate(raw?.skinType || raw?.skinTypeHint);
+  const skinType = normalizeSkinTypeCandidate(raw?.skinType || raw?.skinTypeHint || raw?.skin_type);
   const confidence = clampConfidence(raw?.confidence);
   const summary = String(raw?.summary || raw?.analysis || "").trim();
   const conditions = normalizeImageConditions(raw?.conditions || raw?.detectedConditions, "image");
+  const recommendationMatch = normalizeRecommendationMatch(
+    raw?.recommendationMatch || raw?.recommendation_match || raw?.match,
+  );
 
   return {
     provider,
@@ -1301,6 +1323,7 @@ function normalizeImageInsights(raw, provider) {
     confidence,
     summary,
     conditions,
+    recommendationMatch,
   };
 }
 
@@ -1346,11 +1369,39 @@ function mergeConditions(questionnaireConditions, imageConditions) {
 }
 
 // Explains what `resolveFinalSkinType` does in the backend API flow.
-function resolveFinalSkinType(questionnaireSkinType, imageSkinType, imageConfidence) {
+function resolveFinalSkinType(questionnaireSkinType, imageSkinType, imageConfidence, imageProvider = null) {
+  if (imageSkinType && imageProvider === "endpoint") {
+    return imageSkinType;
+  }
   if (imageSkinType && Number(imageConfidence || 0) >= 0.55) {
     return imageSkinType;
   }
   return questionnaireSkinType;
+}
+
+function buildRecommendationsFromMatch(recommendationMatch) {
+  if (!recommendationMatch || typeof recommendationMatch !== "object") return [];
+
+  const mapping = [
+    ["Cleanser", "recommended_cleanser", "high"],
+    ["Moisturizer", "recommended_moisturizer", "high"],
+    ["Serum", "recommended_serum", "medium"],
+    ["SPF", "recommended_spf", "high"],
+    ["Treatment", "recommended_treatment", "medium"],
+  ];
+
+  return mapping
+    .map(([label, key, priority]) => {
+      const value = recommendationMatch[key];
+      if (!value) return null;
+      return {
+        type: "product",
+        title: label,
+        details: `${label}: ${value}`,
+        priority,
+      };
+    })
+    .filter(Boolean);
 }
 
 // Explains what `computeAnalysisConfidence` does in the backend API flow.
@@ -2214,14 +2265,13 @@ async function optimizeImageForAI(imageBase64, maxDimension = 1024) {
 }
 
 async function callFastAPIPredictSingle(imageBase64, questionnaireData = {}) {
-  const fastApiUrl = (process.env.FASTAPI_URL || "http://localhost:8000").replace(/\/$/, "");
   const payload = {
     imageBase64: imageBase64 || null,
     questionnaireData: questionnaireData || {},
   };
 
   const { response, payload: result } = await fetchJsonWithTimeout(
-    `${fastApiUrl}/predict`,
+    `${FASTAPI_URL}/predict`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2992,9 +3042,15 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
       questionnaireSkinType,
       imageInsights?.skinType || null,
       imageInsights?.confidence ?? null,
+      imageInsights?.provider || null,
     );
     const conditions = mergeConditions(questionnaireConditions, imageInsights?.conditions || []);
-    const recommendations = buildRecommendations(skinType, conditions);
+    const recommendationMatch = normalizeRecommendationMatch(imageInsights?.recommendationMatch);
+    const recommendationsFromMatch = buildRecommendationsFromMatch(recommendationMatch);
+    const recommendations =
+      recommendationsFromMatch.length > 0
+        ? recommendationsFromMatch
+        : buildRecommendations(skinType, conditions);
     const overallScore = calculateOverallScore(conditions);
     const analysisConfidence = computeAnalysisConfidence(conditions, imageInsights?.confidence ?? null);
     const imageAnalysisUsed = Boolean(
@@ -3113,6 +3169,7 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
           description: condition.description,
         })),
         recommendations: recommendations.map((recommendation) => recommendation.details),
+        recommendationMatch,
         analysisMeta: {
           imageProvided: Boolean(imageBase64),
           imageAnalysisUsed,
