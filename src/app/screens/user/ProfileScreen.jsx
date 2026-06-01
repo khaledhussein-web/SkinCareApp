@@ -214,32 +214,6 @@ export const ProfileScreen: React.FC = () => {
             </Card>
           </motion.div>
 
-          {/* Account Stats */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-          >
-            <Card className="border-none shadow-lg bg-white/90 backdrop-blur">
-              <CardContent className="p-6 sm:p-8">
-                <h3 className="text-xl mb-4 text-slate-800">Account Activity</h3>
-                <div className="grid sm:grid-cols-3 gap-6">
-                  <div className="text-center p-4 bg-gradient-to-br from-blue-50 to-cyan-50 rounded-xl">
-                    <p className="text-3xl mb-1 text-blue-600">12</p>
-                    <p className="text-sm text-slate-600">Assessments</p>
-                  </div>
-                  <div className="text-center p-4 bg-gradient-to-br from-purple-50 to-pink-50 rounded-xl">
-                    <p className="text-3xl mb-1 text-purple-600">45</p>
-                    <p className="text-sm text-slate-600">Chat Messages</p>
-                  </div>
-                  <div className="text-center p-4 bg-gradient-to-br from-green-50 to-emerald-50 rounded-xl">
-                    <p className="text-3xl mb-1 text-green-600">8</p>
-                    <p className="text-sm text-slate-600">Days Active</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
         </div>
       </div>
     </div>

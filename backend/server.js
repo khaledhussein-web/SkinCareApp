@@ -3413,7 +3413,7 @@ app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) 
 // POST /api/assessments/compare-progress: AI-powered photo comparison for progress tracking.
 app.post("/api/assessments/compare-progress", authenticateToken, async (req, res) => {
   try {
-    const MIN_COMPARISON_DAYS = 7;
+    const MIN_COMPARISON_DAYS = 5;
     const MS_PER_DAY = 1000 * 60 * 60 * 24;
     const userId = req.authUser.id;
     const {
