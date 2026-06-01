@@ -72,7 +72,7 @@ export const RegisterScreen = () => {
         normalizePhoneNumber(formData.phoneNumber),
       );
       toast.success('Account created successfully!');
-      navigate('/DashboardScreen');
+      navigate('/login');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Registration failed');
     } finally {

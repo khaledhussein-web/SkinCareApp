@@ -1,4 +1,5 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { API_BASE_URL } from "@/app/services/api";
 
 function formatDate(value) {
   return new Date(value).toLocaleDateString("en-US", {
@@ -8,14 +9,35 @@ function formatDate(value) {
   });
 }
 
+function resolveComparisonImageSrc(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) return "";
+  if (value.startsWith("data:image/")) return value;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith("/")) return `${API_BASE_URL}${value}`;
+  return value;
+}
+
 export default function BeforeAfterSlider({ comparison }) {
   const [sliderPercent, setSliderPercent] = useState(50);
+  const [beforeLoadFailed, setBeforeLoadFailed] = useState(false);
+  const [afterLoadFailed, setAfterLoadFailed] = useState(false);
   const containerRef = useRef(null);
 
   const image1 = comparison?.comparison?.image1 || "";
   const image2 = comparison?.comparison?.image2 || "";
+  const beforeImageSrc = resolveComparisonImageSrc(image1);
+  const afterImageSrc = resolveComparisonImageSrc(image2);
   const date1 = comparison?.comparison?.date1;
   const date2 = comparison?.comparison?.date2;
+
+  useEffect(() => {
+    setBeforeLoadFailed(false);
+  }, [beforeImageSrc]);
+
+  useEffect(() => {
+    setAfterLoadFailed(false);
+  }, [afterImageSrc]);
 
   const datesLabel = useMemo(() => {
     if (!date1 || !date2) return "";
@@ -52,13 +74,27 @@ export default function BeforeAfterSlider({ comparison }) {
         onPointerMove={handlePointerMove}
         className="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[4/3] select-none touch-none"
       >
-        {image1 ? (
-          <img src={image1} alt="Before skin assessment" className="absolute inset-0 h-full w-full object-cover" />
-        ) : null}
+        {beforeImageSrc && !beforeLoadFailed ? (
+          <img
+            src={beforeImageSrc}
+            alt="Before skin assessment"
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => setBeforeLoadFailed(true)}
+          />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500">
+            Before photo unavailable
+          </div>
+        )}
 
-        {image2 ? (
+        {afterImageSrc && !afterLoadFailed ? (
           <div className="absolute inset-0 overflow-hidden" style={{ width: `${sliderPercent}%` }}>
-            <img src={image2} alt="After skin assessment" className="h-full w-full object-cover" />
+            <img
+              src={afterImageSrc}
+              alt="After skin assessment"
+              className="h-full w-full object-cover"
+              onError={() => setAfterLoadFailed(true)}
+            />
           </div>
         ) : null}
 

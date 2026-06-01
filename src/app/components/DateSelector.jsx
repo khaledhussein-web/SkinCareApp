@@ -4,6 +4,9 @@ import { Alert, AlertDescription } from "@/app/components/ui/alert";
 import { Button } from "@/app/components/ui/button";
 import { fetchAssessmentsWithImages } from "@/app/services/skincareApi";
 
+const MIN_COMPARISON_DAYS = 7;
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
 function formatDate(value) {
   return new Date(value).toLocaleDateString("en-US", {
     month: "short",
@@ -12,8 +15,23 @@ function formatDate(value) {
   });
 }
 
+function calculateDayDifference(startDateValue, endDateValue) {
+  const startDate = new Date(startDateValue);
+  const endDate = new Date(endDateValue);
+
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return null;
+  }
+
+  const startUtcMidnight = Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate());
+  const endUtcMidnight = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate());
+
+  return Math.floor((endUtcMidnight - startUtcMidnight) / MS_PER_DAY);
+}
+
 export default function DateSelector({ onSelectionChange, onCompare, loadingCompare = false }) {
   const [assessments, setAssessments] = useState([]);
+  const [legacyCount, setLegacyCount] = useState(0);
   const [selectedAssessment1, setSelectedAssessment1] = useState(null);
   const [selectedAssessment2, setSelectedAssessment2] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -27,6 +45,7 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
         const result = await fetchAssessmentsWithImages();
         const loaded = Array.isArray(result?.assessments) ? result.assessments : [];
         setAssessments(loaded);
+        setLegacyCount(Number(result?.legacyCount || 0));
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load saved photos");
       } finally {
@@ -50,7 +69,25 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
     [assessments, selectedAssessment2],
   );
 
-  const canCompare = Boolean(selectedFirst && selectedSecond && selectedFirst.id !== selectedSecond.id);
+  const selectedGapDays = useMemo(() => {
+    if (!selectedFirst || !selectedSecond) return null;
+    return calculateDayDifference(selectedFirst.date, selectedSecond.date);
+  }, [selectedFirst, selectedSecond]);
+
+  useEffect(() => {
+    if (!selectedFirst || !selectedSecond) return;
+    if (selectedGapDays === null || selectedGapDays < MIN_COMPARISON_DAYS) {
+      setSelectedAssessment2(null);
+    }
+  }, [selectedFirst, selectedSecond, selectedGapDays]);
+
+  const canCompare = Boolean(
+    selectedFirst &&
+      selectedSecond &&
+      selectedFirst.id !== selectedSecond.id &&
+      selectedGapDays !== null &&
+      selectedGapDays >= MIN_COMPARISON_DAYS,
+  );
 
   if (loading) {
     return (
@@ -75,7 +112,9 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
       <Alert>
         <AlertCircle className="w-4 h-4" />
         <AlertDescription>
-          You need at least two assessments with photos before you can compare progress.
+          {legacyCount > 0
+            ? `You have ${legacyCount} older photo assessment${legacyCount === 1 ? "" : "s"} saved in a legacy format that can no longer be displayed. Please create at least two new photo assessments to compare progress.`
+            : "You need at least two assessments with photos before you can compare progress."}
         </AlertDescription>
       </Alert>
     );
@@ -111,9 +150,13 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
 
         <div className="space-y-3">
           <h3 className="text-lg text-slate-800">Step 2: Select the later photo</h3>
+          <p className="text-sm text-slate-600">Choose a photo at least {MIN_COMPARISON_DAYS} days after Step 1.</p>
           <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
             {assessments.map((assessment) => {
-              const isDisabled = String(selectedAssessment1) === String(assessment.id);
+              const dayGapFromFirst = selectedFirst ? calculateDayDifference(selectedFirst.date, assessment.date) : null;
+              const isSameAssessment = String(selectedAssessment1) === String(assessment.id);
+              const isTooSoon = selectedFirst && (dayGapFromFirst === null || dayGapFromFirst < MIN_COMPARISON_DAYS);
+              const isDisabled = !selectedFirst || isSameAssessment || isTooSoon;
               const isSelected = String(selectedAssessment2) === String(assessment.id);
               return (
                 <button
@@ -132,6 +175,9 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
                   <p className="text-slate-800">{formatDate(assessment.date)}</p>
                   <p className="text-sm text-slate-600">Score: {assessment.score}</p>
                   <p className="text-xs text-slate-500">Skin type: {assessment.skinType || "Unknown"}</p>
+                  {selectedFirst && isTooSoon ? (
+                    <p className="text-xs text-amber-700 mt-1">Need at least {MIN_COMPARISON_DAYS} days after Step 1</p>
+                  ) : null}
                 </button>
               );
             })}
@@ -144,7 +190,7 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
           <div className="flex items-start gap-2">
             <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />
             <p className="text-sm">
-              Ready to compare {formatDate(selectedFirst.date)} vs {formatDate(selectedSecond.date)}.
+              Ready to compare {formatDate(selectedFirst.date)} vs {formatDate(selectedSecond.date)} ({selectedGapDays} days apart).
             </p>
           </div>
         </div>

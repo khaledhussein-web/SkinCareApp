@@ -29,6 +29,7 @@ const IMAGE_ANALYSIS_PROVIDER = String(process.env.IMAGE_ANALYSIS_PROVIDER || "a
 const FASTAPI_URL = (process.env.FASTAPI_URL || "http://localhost:8000").replace(/\/$/, "");
 const IMAGE_ANALYSIS_ENDPOINT = process.env.IMAGE_ANALYSIS_ENDPOINT || `${FASTAPI_URL}/predict`;
 const IMAGE_ANALYSIS_TIMEOUT_MS = Number(process.env.IMAGE_ANALYSIS_TIMEOUT_MS) || 15_000;
+const REQUIRE_IMAGE_ANALYSIS = String(process.env.REQUIRE_IMAGE_ANALYSIS || "true").toLowerCase() === "true";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4o-mini";
@@ -1200,6 +1201,24 @@ function ensureImageDataUrl(imageBase64) {
   return `data:image/jpeg;base64,${value}`;
 }
 
+// Explains what `resolveStoredAssessmentImageUrl` does in the backend API flow.
+function resolveStoredAssessmentImageUrl(imageUrl, mimeType = null) {
+  const raw = String(imageUrl || "").trim();
+  if (!raw) return null;
+
+  if (raw.startsWith("data:image/")) return raw;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^inline:\/\/assessment\//i.test(raw)) return null;
+
+  // Backward compatibility: allow raw base64 payloads if present.
+  if (/^[A-Za-z0-9+/=\r\n]+$/.test(raw) && raw.length > 128) {
+    const normalizedMime = String(mimeType || "image/jpeg").trim().toLowerCase() || "image/jpeg";
+    return `data:${normalizedMime};base64,${raw.replace(/\s/g, "")}`;
+  }
+
+  return null;
+}
+
 // Explains what `estimateBase64Size` does in the backend API flow.
 function estimateBase64Size(base64Value) {
   const clean = String(base64Value || "").replace(/\s/g, "");
@@ -1237,7 +1256,7 @@ function buildSkinImageMetadata(imageBase64, assessmentId) {
   const extension = extensionByMime[mimeType] || "jpg";
 
   return {
-    imageUrl: `inline://assessment/${assessmentId}`,
+    imageUrl: dataUrl,
     mimeType,
     fileSize,
     fileName: `assessment-${assessmentId}.${extension}`,
@@ -1402,6 +1421,29 @@ function buildRecommendationsFromMatch(recommendationMatch) {
       };
     })
     .filter(Boolean);
+}
+
+function mergeRecommendationLists(primary = [], secondary = []) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const recommendation of [...primary, ...secondary]) {
+    if (!recommendation || typeof recommendation !== "object") continue;
+    const title = String(recommendation.title || "").trim();
+    const details = String(recommendation.details || "").trim();
+    if (!title && !details) continue;
+    const dedupeKey = `${title.toLowerCase()}|${details.toLowerCase()}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    merged.push({
+      type: recommendation.type || "routine",
+      title: title || "Recommendation",
+      details: details || title,
+      priority: recommendation.priority || "medium",
+    });
+  }
+
+  return merged;
 }
 
 // Explains what `computeAnalysisConfidence` does in the backend API flow.
@@ -2489,7 +2531,7 @@ async function fetchAssessmentWithImage(assessmentId, userId, client = null) {
 
   return {
     assessment,
-    imageUrl: imageResult.rows[0]?.image_url || null,
+    imageUrl: resolveStoredAssessmentImageUrl(imageResult.rows[0]?.image_url, imageResult.rows[0]?.mime_type),
     conditions: conditionsResult.rows.map((row) => ({
       name: row.condition_name,
       severity: String(row.severity_level || "mild").toLowerCase(),
@@ -3028,8 +3070,10 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
         resolvedQuestionnaireData = previousQuestionnaireData;
         questionnaireSource = "previous_assessment";
       } else {
-        resolvedQuestionnaireData = {};
-        questionnaireSource = "none";
+        return res.status(400).json({
+          error:
+            "No questionnaire answers were provided and no previous questionnaire was found. Please complete the questionnaire before uploading a photo.",
+        });
       }
     }
 
@@ -3037,6 +3081,12 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
     const questionnaireSkinType = determineSkinType(resolvedQuestionnaireData);
     const questionnaireConditions = buildDetectedConditions(resolvedQuestionnaireData, questionnaireSkinType);
     const imageInsights = await analyzeImageWithAI(imageBase64, resolvedQuestionnaireData);
+    if (!imageInsights && REQUIRE_IMAGE_ANALYSIS) {
+      return res.status(503).json({
+        error: "Image AI analysis is unavailable. Ensure FastAPI is running and reachable.",
+        details: `Endpoint: ${IMAGE_ANALYSIS_ENDPOINT || `${FASTAPI_URL}/predict`}`,
+      });
+    }
 
     const skinType = resolveFinalSkinType(
       questionnaireSkinType,
@@ -3044,13 +3094,17 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
       imageInsights?.confidence ?? null,
       imageInsights?.provider || null,
     );
-    const conditions = mergeConditions(questionnaireConditions, imageInsights?.conditions || []);
+    const conditions =
+      imageInsights?.provider === "endpoint" && Array.isArray(imageInsights?.conditions) && imageInsights.conditions.length > 0
+        ? imageInsights.conditions
+        : mergeConditions(questionnaireConditions, imageInsights?.conditions || []);
     const recommendationMatch = normalizeRecommendationMatch(imageInsights?.recommendationMatch);
     const recommendationsFromMatch = buildRecommendationsFromMatch(recommendationMatch);
+    const recommendationsFromRules = buildRecommendations(skinType, conditions);
     const recommendations =
       recommendationsFromMatch.length > 0
-        ? recommendationsFromMatch
-        : buildRecommendations(skinType, conditions);
+        ? mergeRecommendationLists(recommendationsFromMatch, recommendationsFromRules)
+        : recommendationsFromRules;
     const overallScore = calculateOverallScore(conditions);
     const analysisConfidence = computeAnalysisConfidence(conditions, imageInsights?.confidence ?? null);
     const imageAnalysisUsed = Boolean(
@@ -3252,10 +3306,11 @@ app.get("/api/assessments/with-images", authenticateToken, async (req, res) => {
               sa.assessment_date,
               sa.overall_score,
               sa.notes,
-              si.image_url
+              si.image_url,
+              si.mime_type
        FROM skin_assessments sa
        JOIN LATERAL (
-         SELECT image_url
+         SELECT image_url, mime_type
          FROM skin_images
          WHERE assessment_id = sa.assessment_id AND user_id = sa.user_id
          LIMIT 1
@@ -3265,16 +3320,23 @@ app.get("/api/assessments/with-images", authenticateToken, async (req, res) => {
       [userId],
     );
 
-    const assessments = result.rows.map((row) => ({
-      id: row.assessment_id,
-      date: row.assessment_date,
-      score: Number(row.overall_score || 0),
-      skinType: parseSkinTypeFromAssessmentNotes(row.notes),
-      imageUrl: row.image_url || null,
-      hasImage: Boolean(row.image_url),
-    }));
+    const mappedAssessments = result.rows
+      .map((row) => {
+        const imageUrl = resolveStoredAssessmentImageUrl(row.image_url, row.mime_type);
+        return {
+          id: row.assessment_id,
+          date: row.assessment_date,
+          score: Number(row.overall_score || 0),
+          skinType: parseSkinTypeFromAssessmentNotes(row.notes),
+          imageUrl,
+          hasImage: Boolean(imageUrl),
+        };
+      });
 
-    return res.json({ assessments });
+    const assessments = mappedAssessments.filter((row) => row.hasImage);
+    const legacyCount = mappedAssessments.length - assessments.length;
+
+    return res.json({ assessments, legacyCount });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch assessments with images", details: error.message });
   }
@@ -3351,6 +3413,8 @@ app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) 
 // POST /api/assessments/compare-progress: AI-powered photo comparison for progress tracking.
 app.post("/api/assessments/compare-progress", authenticateToken, async (req, res) => {
   try {
+    const MIN_COMPARISON_DAYS = 7;
+    const MS_PER_DAY = 1000 * 60 * 60 * 24;
     const userId = req.authUser.id;
     const {
       assessmentId1 = null,
@@ -3380,7 +3444,9 @@ app.post("/api/assessments/compare-progress", authenticateToken, async (req, res
     }
 
     if (!assessment1Full.imageUrl || !assessment2Full.imageUrl) {
-      return res.status(400).json({ error: "Both assessments must have images for comparison" });
+      return res.status(400).json({
+        error: "One or both assessments use a legacy photo format that cannot be displayed. Please create new photo assessments and compare those.",
+      });
     }
 
     const assessment1 = assessment1Full.assessment;
@@ -3391,6 +3457,21 @@ app.post("/api/assessments/compare-progress", authenticateToken, async (req, res
       : [assessment2Full, assessment1Full];
     const beforeAssessment = beforeAssessmentFull.assessment;
     const afterAssessment = afterAssessmentFull.assessment;
+
+    const beforeDate = new Date(beforeAssessment.assessment_date);
+    const afterDate = new Date(afterAssessment.assessment_date);
+    if (Number.isNaN(beforeDate.getTime()) || Number.isNaN(afterDate.getTime())) {
+      return res.status(400).json({ error: "One or both assessment dates are invalid" });
+    }
+
+    const beforeUtcMidnight = Date.UTC(beforeDate.getUTCFullYear(), beforeDate.getUTCMonth(), beforeDate.getUTCDate());
+    const afterUtcMidnight = Date.UTC(afterDate.getUTCFullYear(), afterDate.getUTCMonth(), afterDate.getUTCDate());
+    const comparisonDays = Math.floor((afterUtcMidnight - beforeUtcMidnight) / MS_PER_DAY);
+    if (comparisonDays < MIN_COMPARISON_DAYS) {
+      return res.status(400).json({
+        error: `Please select photos at least ${MIN_COMPARISON_DAYS} days apart for progress tracking`,
+      });
+    }
 
     // Optimize images
     const optimizedImage1 = await optimizeImageForAI(beforeAssessmentFull.imageUrl);

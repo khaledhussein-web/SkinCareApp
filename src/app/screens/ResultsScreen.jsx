@@ -101,6 +101,14 @@ export const ResultsScreen = () => {
   const imageProvider =
     analysisResult?.analysisMeta?.imageProvider || analysisResult?.meta?.imageProvider || 'rule-based';
 
+  const questionnaireSource = analysisResult?.analysisMeta?.questionnaireSource || 'unknown';
+  const questionnaireSourceMessage =
+    questionnaireSource === 'request'
+      ? 'Using the questionnaire you submitted in this session.'
+      : questionnaireSource === 'previous_assessment'
+      ? 'Using your latest saved questionnaire from a previous assessment.'
+      : 'Questionnaire source is unavailable for this result.';
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50 py-8 sm:py-12 px-4">
       <motion.div
@@ -212,6 +220,10 @@ export const ResultsScreen = () => {
                     <span className="text-sm text-slate-800">
                       {analysisResult?.analysisMeta?.imageProvided || uploadedImage ? 'Yes' : 'No'}
                     </span>
+                  </div>
+                  <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                    <p className="text-xs text-blue-700">Questionnaire context</p>
+                    <p className="text-sm text-blue-900">{questionnaireSourceMessage}</p>
                   </div>
                 </div>
               </CardContent>

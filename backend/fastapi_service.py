@@ -431,7 +431,11 @@ def extract_image_bytes(raw_image: str | None) -> bytes | None:
 
 
 # Converts model concern scores into frontend-friendly condition cards.
-def build_conditions(scores: dict[str, int], image_bytes: bytes | None) -> list[dict[str, Any]]:
+def build_conditions(
+    scores: dict[str, int],
+    image_bytes: bytes | None,
+    image_prediction: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     image_bonus = 0.04 if image_bytes else 0.0
     templates = {
         "acne": ("Breakout probability detected by trained model.", "T-zone"),
@@ -447,10 +451,49 @@ def build_conditions(scores: dict[str, int], image_bytes: bytes | None) -> list[
         "wrinkles": ("Wrinkle pattern inferred from image classes.", "Eyes/Forehead"),
     }
 
-    conditions: list[dict[str, Any]] = []
+    image_specific = {"dark_spots", "pigmentation", "pores", "wrinkles"}
+    concern_probs = (image_prediction or {}).get("concern_probabilities", {}) if image_prediction else {}
+    skin_type_probs = (image_prediction or {}).get("skin_type_probabilities", {}) if image_prediction else {}
+
+    def image_signal_for_key(key: str) -> float:
+        if not image_prediction:
+            return 0.0
+        if key == "acne":
+            return float(concern_probs.get("acne", 0.0))
+        if key == "redness":
+            return float(concern_probs.get("redness", 0.0))
+        if key == "pores":
+            return float(concern_probs.get("pores", 0.0))
+        if key == "pigmentation":
+            return float(concern_probs.get("pigmentation", 0.0))
+        if key == "dark_spots":
+            return float(concern_probs.get("dark_spots", 0.0))
+        if key == "wrinkles":
+            return float(concern_probs.get("wrinkles", 0.0))
+        if key == "oiliness":
+            return max(float(concern_probs.get("pores", 0.0)), float(skin_type_probs.get("oily", 0.0)))
+        if key in {"dryness", "dehydration"}:
+            return float(skin_type_probs.get("dry", 0.0))
+        if key == "sensitivity":
+            return max(float(concern_probs.get("redness", 0.0)), float(skin_type_probs.get("dry", 0.0)))
+        if key == "mature":
+            return float(concern_probs.get("wrinkles", 0.0))
+        return 0.0
+
+    ranked: list[tuple[float, str, int]] = []
     for key, score in scores.items():
         if score < 2:
             continue
+        signal = image_signal_for_key(key)
+        rank = float(score) + (signal * 3.0) + (0.35 if key in image_specific else 0.0)
+        ranked.append((rank, key, score))
+
+    ranked.sort(key=lambda item: (-item[0], -item[2], item[1]))
+    if image_bytes and ranked:
+        ranked = ranked[:5]
+
+    conditions: list[dict[str, Any]] = []
+    for _rank, key, score in ranked:
         description, area = templates.get(key, ("Concern inferred by model.", "General"))
         confidence = min(0.95, round(0.54 + (score * 0.07) + image_bonus, 2))
         conditions.append(
@@ -656,7 +699,7 @@ def predict(payload: PredictRequest) -> dict[str, Any]:
                 skin_type = image_skin_type
             confidence = round(max(confidence, float(image_prediction.get("confidence", confidence))), 2)
 
-    conditions = build_conditions(scores, image_bytes)
+    conditions = build_conditions(scores, image_bytes, image_prediction=image_prediction)
     recommendation_match = match_recommendation(skin_type, scores)
 
     if image_model_used:
