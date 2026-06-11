@@ -4,18 +4,20 @@ import { Alert, AlertDescription } from "@/app/components/ui/alert";
 import { Button } from "@/app/components/ui/button";
 import { fetchAssessmentsWithImages } from "@/app/services/skincareApi";
 
-const MIN_COMPARISON_DAYS = 5;
-const MS_PER_DAY = 1000 * 60 * 60 * 24;
+const MIN_COMPARISON_MINUTES = 5;
+const MS_PER_MINUTE = 1000 * 60;
 
-function formatDate(value) {
-  return new Date(value).toLocaleDateString("en-US", {
+function formatDateTime(value) {
+  return new Date(value).toLocaleString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 
-function calculateDayDifference(startDateValue, endDateValue) {
+function calculateMinuteDifference(startDateValue, endDateValue) {
   const startDate = new Date(startDateValue);
   const endDate = new Date(endDateValue);
 
@@ -23,10 +25,7 @@ function calculateDayDifference(startDateValue, endDateValue) {
     return null;
   }
 
-  const startUtcMidnight = Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate());
-  const endUtcMidnight = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate());
-
-  return Math.floor((endUtcMidnight - startUtcMidnight) / MS_PER_DAY);
+  return Math.floor((endDate.getTime() - startDate.getTime()) / MS_PER_MINUTE);
 }
 
 export default function DateSelector({ onSelectionChange, onCompare, loadingCompare = false }) {
@@ -69,24 +68,24 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
     [assessments, selectedAssessment2],
   );
 
-  const selectedGapDays = useMemo(() => {
+  const selectedGapMinutes = useMemo(() => {
     if (!selectedFirst || !selectedSecond) return null;
-    return calculateDayDifference(selectedFirst.date, selectedSecond.date);
+    return calculateMinuteDifference(selectedFirst.date, selectedSecond.date);
   }, [selectedFirst, selectedSecond]);
 
   useEffect(() => {
     if (!selectedFirst || !selectedSecond) return;
-    if (selectedGapDays === null || selectedGapDays < MIN_COMPARISON_DAYS) {
+    if (selectedGapMinutes === null || selectedGapMinutes < MIN_COMPARISON_MINUTES) {
       setSelectedAssessment2(null);
     }
-  }, [selectedFirst, selectedSecond, selectedGapDays]);
+  }, [selectedFirst, selectedSecond, selectedGapMinutes]);
 
   const canCompare = Boolean(
     selectedFirst &&
       selectedSecond &&
       selectedFirst.id !== selectedSecond.id &&
-      selectedGapDays !== null &&
-      selectedGapDays >= MIN_COMPARISON_DAYS,
+      selectedGapMinutes !== null &&
+      selectedGapMinutes >= MIN_COMPARISON_MINUTES,
   );
 
   if (loading) {
@@ -139,7 +138,7 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
                       : "border-slate-200 bg-white hover:border-purple-300"
                   }`}
                 >
-                  <p className="text-slate-800">{formatDate(assessment.date)}</p>
+                  <p className="text-slate-800">{formatDateTime(assessment.date)}</p>
                   <p className="text-sm text-slate-600">Score: {assessment.score}</p>
                   <p className="text-xs text-slate-500">Skin type: {assessment.skinType || "Unknown"}</p>
                 </button>
@@ -150,12 +149,15 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
 
         <div className="space-y-3">
           <h3 className="text-lg text-slate-800">Step 2: Select the later photo</h3>
-          <p className="text-sm text-slate-600">Choose a photo at least {MIN_COMPARISON_DAYS} days after Step 1.</p>
+          <p className="text-sm text-slate-600">Choose a photo at least {MIN_COMPARISON_MINUTES} minutes after Step 1.</p>
           <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
             {assessments.map((assessment) => {
-              const dayGapFromFirst = selectedFirst ? calculateDayDifference(selectedFirst.date, assessment.date) : null;
+              const minuteGapFromFirst = selectedFirst
+                ? calculateMinuteDifference(selectedFirst.date, assessment.date)
+                : null;
               const isSameAssessment = String(selectedAssessment1) === String(assessment.id);
-              const isTooSoon = selectedFirst && (dayGapFromFirst === null || dayGapFromFirst < MIN_COMPARISON_DAYS);
+              const isTooSoon = selectedFirst &&
+                (minuteGapFromFirst === null || minuteGapFromFirst < MIN_COMPARISON_MINUTES);
               const isDisabled = !selectedFirst || isSameAssessment || isTooSoon;
               const isSelected = String(selectedAssessment2) === String(assessment.id);
               return (
@@ -172,11 +174,13 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
                         : "border-slate-200 bg-white hover:border-purple-300"
                   }`}
                 >
-                  <p className="text-slate-800">{formatDate(assessment.date)}</p>
+                  <p className="text-slate-800">{formatDateTime(assessment.date)}</p>
                   <p className="text-sm text-slate-600">Score: {assessment.score}</p>
                   <p className="text-xs text-slate-500">Skin type: {assessment.skinType || "Unknown"}</p>
                   {selectedFirst && isTooSoon ? (
-                    <p className="text-xs text-amber-700 mt-1">Need at least {MIN_COMPARISON_DAYS} days after Step 1</p>
+                    <p className="text-xs text-amber-700 mt-1">
+                      Need at least {MIN_COMPARISON_MINUTES} minutes after Step 1
+                    </p>
                   ) : null}
                 </button>
               );
@@ -190,7 +194,7 @@ export default function DateSelector({ onSelectionChange, onCompare, loadingComp
           <div className="flex items-start gap-2">
             <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />
             <p className="text-sm">
-              Ready to compare {formatDate(selectedFirst.date)} vs {formatDate(selectedSecond.date)} ({selectedGapDays} days apart).
+              Ready to compare {formatDateTime(selectedFirst.date)} vs {formatDateTime(selectedSecond.date)} ({selectedGapMinutes} minutes apart).
             </p>
           </div>
         </div>

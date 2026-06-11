@@ -43,6 +43,7 @@ PRODUCTS_DATASET_PATH = _env_path(
     "PRODUCTS_DATASET_PATH",
     DATA_DIR / "products_dataset.csv",
 )
+
 ROUTINES_DATASET_PATH = _env_path(
     "ROUTINES_DATASET_PATH",
     DATA_DIR / "routines_dataset.csv",
@@ -717,6 +718,8 @@ def predict(payload: PredictRequest) -> dict[str, Any]:
         "skinType": skin_type,
         "confidence": confidence,
         "summary": summary,
+        "scores": scores,
+        "trackingScores": image_prediction.get("scores", scores) if image_prediction else scores,
         "conditions": conditions,
         "recommendationMatch": recommendation_match,
         "meta": {

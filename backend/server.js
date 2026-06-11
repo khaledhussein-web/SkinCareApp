@@ -2348,7 +2348,7 @@ async function callFastAPIPrediction(imageBase64_1, imageBase64_2, questionnaire
 }
 
 function normalizePredictionScores(prediction) {
-  const raw = prediction?.scores;
+  const raw = prediction?.trackingScores || prediction?.scores;
   if (!raw || typeof raw !== "object") return {};
   const normalized = {};
   for (const [key, value] of Object.entries(raw)) {
@@ -2360,10 +2360,37 @@ function normalizePredictionScores(prediction) {
   return normalized;
 }
 
+function calculatePredictionOverallScore(scores, fallbackScore) {
+  const values = Object.values(scores || {}).filter((value) => Number.isFinite(Number(value)));
+  if (values.length === 0) return Number(fallbackScore || 0);
+
+  const averageConcern = values.reduce((total, value) => total + Number(value), 0) / values.length;
+  return Math.round(Math.max(35, Math.min(98, 100 - ((averageConcern / 5) * 65))));
+}
+
+function scoreToSeverity(score) {
+  const numeric = Number(score);
+  if (numeric >= 4) return "severe";
+  if (numeric >= 2) return "moderate";
+  return "mild";
+}
+
+function formatConditionName(value) {
+  return String(value || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 // Explains what `calculateProgressMetrics` does in the backend API flow.
-function calculateProgressMetrics(score1, score2, conditions1, conditions2) {
-  const safeScore1 = Number(score1 || 0);
-  const safeScore2 = Number(score2 || 0);
+function calculateProgressMetrics(score1, score2, conditions1, conditions2, predictionScores1 = {}, predictionScores2 = {}) {
+  const hasPredictionScores =
+    Object.keys(predictionScores1).length > 0 && Object.keys(predictionScores2).length > 0;
+  const safeScore1 = hasPredictionScores
+    ? calculatePredictionOverallScore(predictionScores1, score1)
+    : Number(score1 || 0);
+  const safeScore2 = hasPredictionScores
+    ? calculatePredictionOverallScore(predictionScores2, score2)
+    : Number(score2 || 0);
   const scoreDelta = safeScore2 - safeScore1;
   const percentChange = safeScore1 !== 0 ? Number(((scoreDelta / safeScore1) * 100).toFixed(1)) : null;
 
@@ -2371,10 +2398,36 @@ function calculateProgressMetrics(score1, score2, conditions1, conditions2) {
   const conditionMap2 = new Map(conditions2.map((condition) => [String(condition.name || "").toLowerCase(), condition]));
 
   const conditionChanges = [];
-  const allConditionKeys = new Set([...conditionMap1.keys(), ...conditionMap2.keys()]);
+  const allConditionKeys = new Set([
+    ...conditionMap1.keys(),
+    ...conditionMap2.keys(),
+    ...Object.keys(predictionScores1),
+    ...Object.keys(predictionScores2),
+  ]);
   for (const conditionKey of allConditionKeys) {
     const before = conditionMap1.get(conditionKey);
     const after = conditionMap2.get(conditionKey);
+    const beforeNumericScore = Number(predictionScores1[conditionKey]);
+    const afterNumericScore = Number(predictionScores2[conditionKey]);
+
+    if (hasPredictionScores && Number.isFinite(beforeNumericScore) && Number.isFinite(afterNumericScore)) {
+      let trend = "no_change";
+      if (beforeNumericScore < 2 && afterNumericScore >= 2) trend = "new";
+      else if (beforeNumericScore >= 2 && afterNumericScore < 2) trend = "resolved";
+      else if (afterNumericScore < beforeNumericScore) trend = "improved";
+      else if (afterNumericScore > beforeNumericScore) trend = "worsened";
+
+      conditionChanges.push({
+        name: before?.name || after?.name || formatConditionName(conditionKey),
+        beforeSeverity: scoreToSeverity(beforeNumericScore),
+        afterSeverity: scoreToSeverity(afterNumericScore),
+        beforeScore: beforeNumericScore,
+        afterScore: afterNumericScore,
+        trend,
+        confidence: Math.max(Number(before?.confidence || 0), Number(after?.confidence || 0)) || null,
+      });
+      continue;
+    }
 
     if (!before && after) {
       conditionChanges.push({
@@ -2436,6 +2489,9 @@ function calculateProgressMetrics(score1, score2, conditions1, conditions2) {
     unchangedConditions,
     overallProgressPercent,
     conditionChanges,
+    score1: safeScore1,
+    score2: safeScore2,
+    scoreSource: hasPredictionScores ? "photo_analysis" : "stored_assessment",
   };
 }
 
@@ -2443,11 +2499,14 @@ function calculateProgressMetrics(score1, score2, conditions1, conditions2) {
 async function generateProgressReport(assessment1, assessment2, metrics) {
   const date1 = new Date(assessment1.assessment_date);
   const date2 = new Date(assessment2.assessment_date);
-  const daysDiff = Math.round((date2 - date1) / (1000 * 60 * 60 * 24));
+  const minutesDiff = Math.floor(Math.abs(date2 - date1) / (1000 * 60));
+  const comparisonDuration = minutesDiff < 24 * 60
+    ? `${minutesDiff} minutes`
+    : `${Math.floor(minutesDiff / (24 * 60))} days`;
 
   const reportLines = [
     "# Skin Progress Report",
-    `Comparison Period: ${date1.toLocaleDateString()} to ${date2.toLocaleDateString()} (${daysDiff} days)`,
+    `Comparison Period: ${date1.toLocaleString()} to ${date2.toLocaleString()} (${comparisonDuration})`,
     "",
     "## Overall Progress",
     `Score Change: ${metrics.scoreDelta > 0 ? "+" : ""}${metrics.scoreDelta} points (${metrics.percentChange === null ? "N/A" : `${metrics.percentChange}%`})`,
@@ -3413,8 +3472,8 @@ app.get("/api/assessments/weekly-progress", authenticateToken, async (req, res) 
 // POST /api/assessments/compare-progress: AI-powered photo comparison for progress tracking.
 app.post("/api/assessments/compare-progress", authenticateToken, async (req, res) => {
   try {
-    const MIN_COMPARISON_DAYS = 5;
-    const MS_PER_DAY = 1000 * 60 * 60 * 24;
+    const MIN_COMPARISON_MINUTES = 5;
+    const MS_PER_MINUTE = 1000 * 60;
     const userId = req.authUser.id;
     const {
       assessmentId1 = null,
@@ -3464,12 +3523,10 @@ app.post("/api/assessments/compare-progress", authenticateToken, async (req, res
       return res.status(400).json({ error: "One or both assessment dates are invalid" });
     }
 
-    const beforeUtcMidnight = Date.UTC(beforeDate.getUTCFullYear(), beforeDate.getUTCMonth(), beforeDate.getUTCDate());
-    const afterUtcMidnight = Date.UTC(afterDate.getUTCFullYear(), afterDate.getUTCMonth(), afterDate.getUTCDate());
-    const comparisonDays = Math.floor((afterUtcMidnight - beforeUtcMidnight) / MS_PER_DAY);
-    if (comparisonDays < MIN_COMPARISON_DAYS) {
+    const comparisonMinutes = Math.floor((afterDate.getTime() - beforeDate.getTime()) / MS_PER_MINUTE);
+    if (comparisonMinutes < MIN_COMPARISON_MINUTES) {
       return res.status(400).json({
-        error: `Please select photos at least ${MIN_COMPARISON_DAYS} days apart for progress tracking`,
+        error: `Please select photos at least ${MIN_COMPARISON_MINUTES} minutes apart for progress tracking`,
       });
     }
 
@@ -3506,6 +3563,8 @@ app.post("/api/assessments/compare-progress", authenticateToken, async (req, res
       afterAssessment.overall_score,
       fastApiResult.conditions1,
       fastApiResult.conditions2,
+      normalizePredictionScores(fastApiResult.prediction1),
+      normalizePredictionScores(fastApiResult.prediction2),
     );
 
     // Generate progress report
@@ -3535,8 +3594,8 @@ Write a brief 2-3 sentence narrative summary of the user's skin progress.`;
         date2: afterAssessment.assessment_date,
         image1: beforeAssessmentFull.imageUrl,
         image2: afterAssessmentFull.imageUrl,
-        score1: Number(beforeAssessment.overall_score || 0),
-        score2: Number(afterAssessment.overall_score || 0),
+        score1: metrics.score1,
+        score2: metrics.score2,
         analysis1: {
           summary: fastApiResult.prediction1?.summary || null,
           confidence: fastApiResult.prediction1?.confidence ?? null,
@@ -3561,6 +3620,7 @@ Write a brief 2-3 sentence narrative summary of the user's skin progress.`;
         resolvedConditions: metrics.resolvedConditions,
         unchangedConditions: metrics.unchangedConditions,
         overallProgressPercent: metrics.overallProgressPercent,
+        scoreSource: metrics.scoreSource,
       },
       analysis: {
         report,

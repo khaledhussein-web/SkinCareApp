@@ -50,7 +50,7 @@ export default function ComparisonMetrics({ metrics }) {
         <p className="mt-1 text-sm text-slate-600">Overall Progress: {metrics.overallProgressPercent}%</p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         <MetricPill
           title="Improved"
           value={metrics.conditionsImproved?.length || 0}
@@ -71,6 +71,11 @@ export default function ComparisonMetrics({ metrics }) {
           value={metrics.resolvedConditions?.length || 0}
           className="border-sky-200 bg-sky-50 text-sky-700"
         />
+        <MetricPill
+          title="Unchanged"
+          value={metrics.unchangedConditions?.length || 0}
+          className="border-slate-200 bg-slate-50 text-slate-700"
+        />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
@@ -89,6 +94,10 @@ export default function ComparisonMetrics({ metrics }) {
         <div className="rounded-xl border border-sky-200 bg-sky-50 p-3">
           <p className="text-sky-800">Resolved Conditions</p>
           <p className="text-sky-700">{formatConditionList(metrics.resolvedConditions)}</p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 md:col-span-2">
+          <p className="text-slate-800">Unchanged Conditions</p>
+          <p className="text-slate-700">{formatConditionList(metrics.unchangedConditions)}</p>
         </div>
       </div>
     </div>
