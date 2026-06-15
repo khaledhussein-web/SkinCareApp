@@ -1493,7 +1493,11 @@ async function analyzeImageViaEndpoint(imageBase64, questionnaireData) {
   );
 
   if (!response.ok) {
-    throw new Error(payload?.error || payload?.message || `Image endpoint failed with ${response.status}`);
+    const endpointError = new Error(
+      payload?.detail || payload?.error || payload?.message || `Image endpoint failed with ${response.status}`,
+    );
+    endpointError.statusCode = response.status;
+    throw endpointError;
   }
 
   return normalizeImageInsights(payload, "endpoint");
@@ -1584,6 +1588,9 @@ async function analyzeImageWithAI(imageBase64, questionnaireData) {
         if (result) return result;
       }
     } catch (error) {
+      if (Number(error?.statusCode) === 422) {
+        throw error;
+      }
       console.warn(`[image-analysis:${provider}] ${error.message}`);
     }
   }
@@ -3294,6 +3301,9 @@ app.post("/api/assessments/analyze", authenticateToken, async (req, res) => {
     });
   } catch (error) {
     await client.query("ROLLBACK");
+    if (Number(error?.statusCode) === 422) {
+      return res.status(422).json({ error: error.message });
+    }
     return res.status(500).json({ error: "Failed to run analysis", details: error.message });
   } finally {
     client.release();

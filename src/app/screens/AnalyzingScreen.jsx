@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import { Sparkles, Loader2 } from "lucide-react";
+import { Button } from "@/app/components/ui/button";
 import { useSkinCare } from "@/app/context/SkinCareContext";
 import { useAuth } from "@/app/context/AuthContext";
 import { runSkinAnalysis } from "@/app/services/skincareApi";
@@ -12,12 +13,17 @@ export const AnalyzingScreen = () => {
   const {
     questionnaireData,
     uploadedImage,
+    setUploadedImage,
     setAnalysisResult,
     setLatestAssessmentId,
     setChatConversationId,
     setForceNewChatSession,
   } = useSkinCare();
   const [error, setError] = useState("");
+  const handleRetakePhoto = () => {
+    setUploadedImage(null);
+    navigate("/upload");
+  };
 
   useEffect(() => {
     // Kick off analysis when this screen mounts, then route to results.
@@ -95,8 +101,14 @@ export const AnalyzingScreen = () => {
         </p>
 
         {error ? (
-          <div className="max-w-md mx-auto p-4 rounded-lg bg-red-50 border border-red-200 text-red-700">
-            {error}
+          <div className="max-w-md mx-auto p-5 rounded-lg bg-red-50 border border-red-200 text-red-700">
+            <p>{error}</p>
+            <Button
+              onClick={handleRetakePhoto}
+              className="mt-4 rounded-full bg-gradient-to-r from-pink-500 to-purple-500 px-6 text-white hover:from-pink-600 hover:to-purple-600"
+            >
+              Retake Photo
+            </Button>
           </div>
         ) : (
           <div className="space-y-3">

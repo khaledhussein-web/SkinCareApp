@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +66,20 @@ IMAGE_SKIN_TYPE_DATASET_PATH = _env_path(
 IMAGE_MODEL_ARTIFACT_PATH = _env_path(
     "AI_IMAGE_MODEL_ARTIFACT_PATH",
     MODELS_DIR / "skincare_image_models.joblib",
+)
+NO_FACE_MESSAGE = "No face detected. Please upload a clear photo of your face."
+MIN_FACE_AREA_RATIO = float(os.getenv("AI_MIN_FACE_AREA_RATIO", "0.015"))
+FACE_CASCADE_NAMES = (
+    "haarcascade_frontalface_default.xml",
+    "haarcascade_frontalface_alt2.xml",
+)
+FACE_CASCADES = tuple(
+    cascade
+    for cascade in (
+        cv2.CascadeClassifier(str(Path(cv2.data.haarcascades) / cascade_name))
+        for cascade_name in FACE_CASCADE_NAMES
+    )
+    if not cascade.empty()
 )
 
 
@@ -431,6 +447,40 @@ def extract_image_bytes(raw_image: str | None) -> bytes | None:
         return None
 
 
+# Rejects non-face uploads before the image model can force them into a skin category.
+def image_contains_face(image_bytes: bytes) -> bool:
+    if not FACE_CASCADES:
+        raise RuntimeError("OpenCV face detection classifiers are unavailable.")
+
+    encoded = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=422, detail="The uploaded image could not be read.")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    if max(height, width) > 1600:
+        scale = 1600 / max(height, width)
+        gray = cv2.resize(gray, (max(1, int(width * scale)), max(1, int(height * scale))))
+
+    image_area = gray.shape[0] * gray.shape[1]
+    min_face_side = max(24, int(min(gray.shape) * 0.08))
+    variants = (gray, cv2.equalizeHist(gray))
+    for variant in variants:
+        for cascade in FACE_CASCADES:
+            faces = cascade.detectMultiScale(
+                variant,
+                scaleFactor=1.07,
+                minNeighbors=3,
+                minSize=(min_face_side, min_face_side),
+            )
+            for _x, _y, face_width, face_height in faces:
+                face_area_ratio = (face_width * face_height) / image_area
+                if face_area_ratio >= MIN_FACE_AREA_RATIO:
+                    return True
+    return False
+
+
 # Converts model concern scores into frontend-friendly condition cards.
 def build_conditions(
     scores: dict[str, int],
@@ -681,6 +731,10 @@ def routines_match(
 def predict(payload: PredictRequest) -> dict[str, Any]:
     questionnaire = payload.questionnaireData or {}
     image_bytes = extract_image_bytes(payload.imageBase64)
+    if payload.imageBase64 and not image_bytes:
+        raise HTTPException(status_code=422, detail="The uploaded image could not be read.")
+    if image_bytes and not image_contains_face(image_bytes):
+        raise HTTPException(status_code=422, detail=NO_FACE_MESSAGE)
 
     model_prediction = MODEL_SERVICE.predict(questionnaire)
     skin_type = model_prediction["skin_type"]
