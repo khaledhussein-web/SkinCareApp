@@ -36,6 +36,7 @@ export const HomeScreen: React.FC = () => {
     { number: '02', title: 'Upload Photo', description: 'Take a clear photo of your face' },
     { number: '03', title: 'Get Analysis', description: 'Receive detailed skin analysis results' },
     { number: '04', title: 'Chat & Learn', description: 'Get personalized recommendations' },
+    { number: '05', title: 'Progress Tracking', description: 'Compare photos and monitor skin changes over time' },
   ];
 
   return (
@@ -154,11 +155,11 @@ export const HomeScreen: React.FC = () => {
               How It Works
             </h2>
             <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-              Get personalized skincare recommendations in four simple steps
+              Get personalized skincare recommendations in five simple steps
             </p>
           </motion.div>
 
-          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-8">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-8">
             {steps.map((step, index) => (
               <motion.div
                 key={index}

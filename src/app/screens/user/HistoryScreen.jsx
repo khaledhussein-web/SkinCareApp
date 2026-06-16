@@ -100,7 +100,7 @@ export const HistoryScreen = () => {
               </div>
               <div className="grid sm:grid-cols-3 gap-5">
                 <div>
-                  <p className="text-white/80 text-sm mb-1">Latest Score</p>
+                  <p className="text-white/80 text-sm mb-1">Health Score</p>
                   <p className="text-4xl">{progressStats.latestScore}</p>
                 </div>
                 <div>
