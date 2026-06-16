@@ -74,26 +74,26 @@ export default function BeforeAfterSlider({ comparison }) {
         onPointerMove={handlePointerMove}
         className="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[4/3] select-none touch-none"
       >
-        {beforeImageSrc && !beforeLoadFailed ? (
+        {afterImageSrc && !afterLoadFailed ? (
           <img
-            src={beforeImageSrc}
-            alt="Before skin assessment"
+            src={afterImageSrc}
+            alt="After skin assessment"
             className="absolute inset-0 h-full w-full object-cover"
-            onError={() => setBeforeLoadFailed(true)}
+            onError={() => setAfterLoadFailed(true)}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500">
-            Before photo unavailable
+            After photo unavailable
           </div>
         )}
 
-        {afterImageSrc && !afterLoadFailed ? (
+        {beforeImageSrc && !beforeLoadFailed ? (
           <div className="absolute inset-0 overflow-hidden" style={{ width: `${sliderPercent}%` }}>
             <img
-              src={afterImageSrc}
-              alt="After skin assessment"
+              src={beforeImageSrc}
+              alt="Before skin assessment"
               className="h-full w-full object-cover"
-              onError={() => setAfterLoadFailed(true)}
+              onError={() => setBeforeLoadFailed(true)}
             />
           </div>
         ) : null}
