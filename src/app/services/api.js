@@ -259,6 +259,9 @@ export async function apiFetch(path, options = {}) {
 
   if (response.status === 401) {
     clearAuthStorage();
+    if (isAuthWritePath(path)) {
+      throw new Error(payload.error || payload.message || "Invalid email or password");
+    }
     notifyAuthExpired();
     throw new Error("Session expired. Please sign in again.");
   }
