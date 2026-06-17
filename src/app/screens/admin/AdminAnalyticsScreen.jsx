@@ -15,7 +15,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { TrendingUp, Users, Activity, Calendar } from "lucide-react";
+import { Users, Activity, Calendar } from "lucide-react";
 import { fetchAdminAnalytics } from "@/app/services/skincareApi";
 
 const palette = ["#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#ec4899"];
@@ -65,12 +65,6 @@ export const AdminAnalyticsScreen = () => {
       icon: Calendar,
       color: "from-purple-400 to-pink-400",
     },
-    {
-      title: "Growth Tracking",
-      value: `${analytics.userGrowthData?.length || 0} months`,
-      icon: TrendingUp,
-      color: "from-orange-400 to-red-400",
-    },
   ];
 
   const skinTypeData = (analytics.skinTypeData || []).map((item, index) => ({
@@ -108,7 +102,7 @@ export const AdminAnalyticsScreen = () => {
                     </div>
                   </div>
                   <h3 className="text-2xl sm:text-3xl mb-1 text-slate-800">
-                    {Number(stat.value).toLocaleString ? Number(stat.value).toLocaleString() : stat.value}
+                    {Number(stat.value).toLocaleString()}
                   </h3>
                   <p className="text-sm text-slate-600">{stat.title}</p>
                 </CardContent>
